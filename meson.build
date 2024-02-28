@@ -23,3 +23,7 @@ executable('injector',
            'src/vmi.c',
            dependencies : [ libxc, libxl, glib, libvmi ],
            install : true)
+
+executable('dummy_injector',
+            'src/dummy_injector.c',
+            install : true)
