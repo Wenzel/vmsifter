@@ -5,6 +5,7 @@ from typing import Dict, Type
 
 from vmsifter.config import InjectorType, settings
 
+from .dummy import DummyInjector
 from .types import (
     NUMBER_OF_REGISTERS,
     AbstractInjector,
@@ -19,7 +20,10 @@ from .types import (
 )
 from .xenvm import XenVMInjector
 
-MAP_CONFIG_INJECTOR: Dict[InjectorType, Type[AbstractInjector]] = {InjectorType.XENVM: XenVMInjector}
+MAP_CONFIG_INJECTOR: Dict[InjectorType, Type[AbstractInjector]] = {
+    InjectorType.DUMMY: DummyInjector,
+    InjectorType.XENVM: XenVMInjector,
+}
 
 
 def get_selected_injector() -> Type[AbstractInjector]:
