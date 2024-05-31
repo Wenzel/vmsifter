@@ -23,3 +23,9 @@ executable('injector',
            'src/vmi.c',
            dependencies : [ libxc, libxl, glib, libvmi ],
            install : true)
+
+executable('xed_injector',
+            'src/xed_injector.c',
+            c_args: ['-I/root/xedkit/include'],
+            link_args: ['-L/root/xedkit/lib', '-lxed'],
+            install : true)
