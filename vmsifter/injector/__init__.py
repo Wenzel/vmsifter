@@ -17,9 +17,13 @@ from .types import (
     PageFaultEC,
     RegistersEnum,
 )
+from .xed import XedInjector
 from .xenvm import XenVMInjector
 
-MAP_CONFIG_INJECTOR: Dict[InjectorType, Type[AbstractInjector]] = {InjectorType.XENVM: XenVMInjector}
+MAP_CONFIG_INJECTOR: Dict[InjectorType, Type[AbstractInjector]] = {
+    InjectorType.XED: XedInjector,
+    InjectorType.XENVM: XenVMInjector,
+}
 
 
 def get_selected_injector() -> Type[AbstractInjector]:
