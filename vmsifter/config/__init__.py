@@ -91,6 +91,7 @@ settings = Dynaconf(
         Validator("fuzzer.drizzler.injections", cast=int),
         Validator("fuzzer.drizzler.aggressive", cast=bool),
         Validator("injector.xenvm.injector_path", default=shutil.which("injector"), must_exist=True),
+        Validator("injector.xed.injector_path", default=shutil.which("xed_injector"), must_exist=True),
         # TODO: why we need str(  ) ? settings.x86.exec_mode already has a cast
         Validator(
             "injector.xenvm.xl.config",
