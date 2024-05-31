@@ -36,6 +36,7 @@ class FuzzerType(Enum):
 
 
 class InjectorType(Enum):
+    XED = auto()
     XENVM = auto()
 
 
