@@ -156,6 +156,10 @@ static bool inject_insn(struct InjectorInputMessage* input_insn, struct Injector
             printf("%.2x ", input_insn->insn[i]);
     }
 
+    // fill res->regs with canary values
+    // for (unsigned int i = 0; i < NUMBER_OF_REGISTERS; i++) {
+    //     res->regs[i] = 0x1100 + i;
+    // }
 
     xed_decoded_inst_t decoded = {0};
     // set mode
@@ -171,6 +175,28 @@ static bool inject_insn(struct InjectorInputMessage* input_insn, struct Injector
     res->insn_size = xed_decoded_inst_get_length(&decoded);
     // force MTF
     res->reason = 37;
+    // get xed_insn_t
+    // const xed_inst_t *xed_insn = xed_decoded_inst_inst(&decoded);
+    // const unsigned int noperands = xed_inst_noperands(xed_insn);
+
+    // for (unsigned int i = 0; i < noperands; i++) {
+    //     const xed_operand_t* op = xed_inst_operand(xed_insn, i);
+    //     xed_operand_enum_t op_type = xed_operand_name(op);
+    //     xed_reg_enum_t reg = 0;
+    //     // identify every register that is unconditionnally written by this instruction
+    //     if (xed_operand_rw(op) == XED_OPERAND_WRITE) {
+    //         switch (op_type) {
+    //         case XED_OPERAND_REG0:
+    //             reg = xed_decoded_inst_get_reg(&decoded, op_type);
+    //             printf("reg: %s\n", xed_reg_enum_t2str(reg));
+    //             res->regs[_RAX] = 0xdeadbeef;
+    //             break;
+    //         default:
+    //             break;
+    //         }
+    //     }
+    // }
+
 
     return true;
 }
