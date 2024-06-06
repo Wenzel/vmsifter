@@ -163,7 +163,10 @@ static bool inject_insn(struct InjectorInputMessage* input_insn, struct Injector
     // decode length only
     xed_error_enum_t error = xed_ild_decode(&decoded, input_insn->insn, input_insn->insn_size);
     if (error != XED_ERROR_NONE) {
-        fprintf(stderr, "Failed to decode instruction: %s", xed_error_enum_t2str(error));
+        fprintf(stderr, "Failed to decode instruction: ");
+        for (unsigned int i=0; i<input_insn->insn_size;i++)
+            fprintf(stderr, "%.2x ", input_insn->insn[i]);
+        fprintf(stderr, " - %s\n", xed_error_enum_t2str(error));
     }
     res->insn_size = xed_decoded_inst_get_length(&decoded);
     // force MTF
