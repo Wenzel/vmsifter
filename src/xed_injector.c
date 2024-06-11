@@ -165,16 +165,24 @@ static bool inject_insn(struct InjectorInputMessage* input_insn, struct Injector
     // set mode
     xed_decoded_inst_zero_set_mode(&decoded, &xed_state);
     // decode length only
-    xed_error_enum_t error = xed_ild_decode(&decoded, input_insn->insn, input_insn->insn_size);
+    xed_error_enum_t error = xed_decode(&decoded, input_insn->insn, input_insn->insn_size);
     if (error != XED_ERROR_NONE) {
         fprintf(stderr, "Failed to decode instruction: ");
         for (unsigned int i=0; i<input_insn->insn_size;i++)
             fprintf(stderr, "%.2x ", input_insn->insn[i]);
         fprintf(stderr, " - %s\n", xed_error_enum_t2str(error));
+        return true;
     }
     res->insn_size = xed_decoded_inst_get_length(&decoded);
     // force MTF
     res->reason = 37;
+
+    char buf[256] = {0};
+    if (!xed_format_context(XED_SYNTAX_INTEL, &decoded, buf, 256, 0x1000, NULL, NULL)) {
+        fprintf(stderr, "Failed to format instruction\n");
+    }
+    fprintf(stderr, "Instruction: %s\n", buf);
+
     // get xed_insn_t
     // const xed_inst_t *xed_insn = xed_decoded_inst_inst(&decoded);
     // const unsigned int noperands = xed_inst_noperands(xed_insn);
