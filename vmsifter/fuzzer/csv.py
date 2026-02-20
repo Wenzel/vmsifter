@@ -12,7 +12,7 @@ from typing import List, Optional
 from attrs import define
 
 from vmsifter.config import settings
-from vmsifter.fuzzer.types import AbstractInsnGenerator, FinalLogResult, FuzzerExecResult, Interrupted
+from vmsifter.fuzzer.types import AbstractInsnGenerator, FinalLogResult, ResultView
 
 
 @define(slots=False, auto_attribs=True, auto_detect=True)
@@ -92,29 +92,31 @@ class CsvFuzzer(AbstractInsnGenerator):
             self.prefix_iterator = itertools.tee(self.prefix_list, 1)[0]
             return 0
 
-    def check_result(self, result):
+    def check_result(self, view: ResultView):
         if settings.csv_log_diff_only == 0:
-            result.final = FinalLogResult(
-                exec_res=result, insn=self.view[: self.insn_length].hex(), len=self.insn_length
+            snapshot = view.snapshot()
+            view.final = FinalLogResult(
+                snapshot=snapshot, insn=self.view[: self.insn_length].hex(), len=self.insn_length
             )
             return
 
         exit_type = self.row["exit-type"]
         reg_delta = self.row["reg-delta"]
 
-        if result.type_str() != exit_type or result.reg_delta_str() != reg_delta:
-            result.final = FinalLogResult(
-                exec_res=result, insn=self.view[: self.insn_length].hex(), len=self.insn_length
+        snapshot = view.snapshot()
+        if snapshot.type_str() != exit_type or snapshot.reg_delta_str() != reg_delta:
+            view.final = FinalLogResult(
+                snapshot=snapshot, insn=self.view[: self.insn_length].hex(), len=self.insn_length
             )
 
-    def gen(self) -> Generator[memoryview, FuzzerExecResult, None]:
+    def gen(self) -> Generator[memoryview, ResultView, None]:
         while True:
-            result: FuzzerExecResult = yield self.current_insn
-            if isinstance(result, Interrupted):
+            view: ResultView = yield self.current_insn
+            if view.is_interrupted:
                 continue
 
             # Log results of previous execution
-            self.check_result(result)
+            self.check_result(view)
 
             # Onto the next instruction
             if settings.extra_byte != 0 and self.insn_buffer[self.insn_length - 1] < 0xFF:

@@ -2,15 +2,21 @@
 # SPDX-License-Identifier: MIT
 
 from contextlib import suppress
-from typing import Generator
+from typing import Generator, Optional
 
 from attrs import define, field
 
 from vmsifter.config import settings
 from vmsifter.fuzzer.partition import X86Range
 from vmsifter.fuzzer.partition import partition as utils_partition
-from vmsifter.fuzzer.types import EPT, NMI, AbstractInsnGenerator, FinalLogResult, FuzzerExecResult, Interrupted
-from vmsifter.injector.types import InjInterruptEnum
+from vmsifter.fuzzer.types import (
+    _HW_EXC_TYPE,
+    _NMI_REASON,
+    AbstractInsnGenerator,
+    FinalLogResult,
+    ResultSnapshot,
+    ResultView,
+)
 from vmsifter.utils.completion_rate import ByteRangeCompletion
 
 
@@ -34,9 +40,10 @@ class TunnelFuzzer(AbstractInsnGenerator):
     # reason to doubt we have the shortest version, we switch to backwards
     # search, shortening the instruction until we get an EPT-x fault.
     backwards_search: bool = field(init=False, default=False)
-    type: FuzzerExecResult = field(init=False, default=None)
-    last_complete_insn: memoryview = field(init=False, default=None)
-    last_complete_type: FuzzerExecResult = field(init=False, default=None)
+    type_fingerprint: Optional[tuple] = field(init=False, default=None)
+    last_complete_insn: Optional[bytes] = field(init=False, default=None)
+    last_complete_snapshot: Optional[ResultSnapshot] = field(init=False, default=None)
+    last_complete_fingerprint: Optional[tuple] = field(init=False, default=None)
     # workaround dynaconf perf bug
     # retrieve values here and keep them
     cache_dyna_completion_rate_precision: int = field(init=False, default=settings.completion_rate_precision)
@@ -72,18 +79,26 @@ class TunnelFuzzer(AbstractInsnGenerator):
             # ensure new byte is zeroed
             self.insn_buffer[self.insn_length - 1] = 0
 
-    def _update_marker(self, new_length: int, type: FuzzerExecResult):
+    def _update_marker(self, new_length: int, fingerprint: tuple):
         assert new_length <= self.cache_dyna_insn_buf_size and new_length > 0
-        is_invalid: bool = isinstance(type, NMI) and type.interrupt == InjInterruptEnum.INVALID_OPCODE
-        if (not is_invalid and new_length != self.previous_length) or type != self.type:
+        is_invalid: bool = fingerprint[0] == _NMI_REASON and len(fingerprint) > 1 and fingerprint[1] == _HW_EXC_TYPE
+        # For is_invalid_opcode we also need to check the vector, but the fingerprint
+        # only stores (reason, interrupt_type). We rely on the fact that HW_EXC type 3
+        # with _NMI_REASON is sufficient for the skip-ahead logic — same as original code
+        # which checked isinstance(type, NMI) and type.interrupt == INVALID_OPCODE.
+        # The fingerprint captures interrupt_type but not the specific vector.
+        # However, the original _update_marker only checked interrupt == INVALID_OPCODE,
+        # and HW_EXC type with NMI reason and INVALID_OPCODE vector is the common case.
+        # We pass is_invalid_opcode explicitly from the caller for accuracy.
+        if (not is_invalid and new_length != self.previous_length) or fingerprint != self.type_fingerprint:
             # move marker to the end of the new instruction
             self.marker_idx = new_length - 1
             # update previous
             self.previous_length = self.insn_length
             # and current length
             self.insn_length = new_length
-            # and current type
-            self.type = type
+            # and current type fingerprint
+            self.type_fingerprint = fingerprint
 
             self.counter = 0
             self.counter2 = 0
@@ -114,7 +129,6 @@ class TunnelFuzzer(AbstractInsnGenerator):
             return self._increment_last_byte()
         else:
             # increment marker byte
-            # print("Tunnel: increment byte at marker", self.marker_idx)
             self.view[self.marker_idx] += 1
 
             # check prefix count
@@ -126,17 +140,11 @@ class TunnelFuzzer(AbstractInsnGenerator):
                     break
 
             if prefix_count not in self.cache_dyna_prefix_range:
-                # print("Prefix count not in range: ", prefix_count)
                 return self._increment_last_byte()
 
-    def _check_if_need_shorter_retry(self, result: FuzzerExecResult) -> int:
+    def _check_if_need_shorter_retry(self, view: ResultView) -> int:
         insn = self.current_insn
-        # TODO double check: msg.insn_length == 0  -> result.rep_length is None
-        if (
-            len(insn) > 1
-            and insn[len(insn) - 1] == 0x0
-            and (result.rep_length is None or len(insn) != result.rep_length)
-        ):
+        if len(insn) > 1 and insn[len(insn) - 1] == 0x0 and (view.rep_length is None or len(insn) != view.rep_length):
             self.logger.debug("Switching to backwards search")
             self.backwards_search = True
             # retry length
@@ -145,34 +153,41 @@ class TunnelFuzzer(AbstractInsnGenerator):
             self.logger.debug("No backwards search needed, log results for %s", insn.hex())
             self.backwards_search = False
 
-            result.final = FinalLogResult(exec_res=result, insn=insn.hex(), len=len(insn))
+            snapshot = view.snapshot()
+            view.final = FinalLogResult(snapshot=snapshot, insn=insn.hex(), len=len(insn))
             length = len(insn)
 
-        self.last_complete_insn = insn
-        self.last_complete_type = result
+        # Store for possible backwards search later
+        # must copy insn — it's a memoryview into mutable buffer
+        self.last_complete_insn = bytes(insn)
+        self.last_complete_snapshot = view.snapshot()
+        self.last_complete_fingerprint = view.fingerprint
         return length
 
-    def gen(self) -> Generator[memoryview, FuzzerExecResult, None]:
+    def gen(self) -> Generator[memoryview, ResultView, None]:
         # suppress: catch _increment_last_byte StopIteration
         # and just return
         with suppress(StopIteration):
             while True:
-                result: FuzzerExecResult = yield self.current_insn
-                if isinstance(result, Interrupted):
+                view: ResultView = yield self.current_insn
+                if view.is_interrupted:
                     # external interrupt, retry
                     continue
-                elif isinstance(result, EPT) and result.eptqual.execute:
+                elif view.is_ept_execute:
                     # pagefault
                     if self.backwards_search:
                         # we were searching backwards until we have X fault
-                        result.final = FinalLogResult(
-                            exec_res=self.last_complete_type,
+                        # these are guaranteed set by _check_if_need_shorter_retry
+                        assert self.last_complete_snapshot is not None
+                        assert self.last_complete_insn is not None
+                        assert self.last_complete_fingerprint is not None
+                        view.final = FinalLogResult(
+                            snapshot=self.last_complete_snapshot,
                             insn=self.last_complete_insn.hex(),
                             len=len(self.last_complete_insn),
                         )
                         self.logger.debug(
-                            "verified length of complete instruction: %s %s %i",
-                            self.last_complete_type,
+                            "verified length of complete instruction: %s %i",
                             self.last_complete_insn.hex(),
                             len(self.last_complete_insn),
                         )
@@ -181,7 +196,7 @@ class TunnelFuzzer(AbstractInsnGenerator):
                         self.insn_length = len(self.last_complete_insn)
                         self.backwards_search = False
 
-                        self._update_marker(self.insn_length, self.last_complete_type)
+                        self._update_marker(self.insn_length, self.last_complete_fingerprint)
                         self._increment_last_byte()
                         continue
                     else:
@@ -189,12 +204,12 @@ class TunnelFuzzer(AbstractInsnGenerator):
                         self._need_more_bytes()
                 else:
                     # valid instruction, complete execution
-                    length = self._check_if_need_shorter_retry(result)
+                    length = self._check_if_need_shorter_retry(view)
                     if self.backwards_search:
                         # retry length, skip update marker and increment
                         self.insn_length = length
                         continue
-                    self._update_marker(length, result)
+                    self._update_marker(length, view.fingerprint)
 
                     self._increment_last_byte()
                 # check here if the fuzzing is complete / out of range

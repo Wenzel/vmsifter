@@ -7,11 +7,11 @@ from itertools import count
 from pathlib import Path
 from typing import Counter
 
-from attr import asdict, define, field
+from attr import define, field
 
 from vmsifter.config import settings
-from vmsifter.fuzzer.types import AbstractInsnGenerator, FuzzerExecResult
-from vmsifter.injector.types import ExitReasonEnum, InjectorResultMessage
+from vmsifter.fuzzer.types import AbstractInsnGenerator, ResultView
+from vmsifter.injector.types import InjectorResultMessage
 from vmsifter.output import CSVOutput
 from vmsifter.utils import pformat
 from vmsifter.utils.protected_manager import ProtectedContextManager
@@ -73,18 +73,13 @@ class Worker(ProtectedContextManager):
         except (BrokenPipeError, ConnectionResetError) as e:
             raise EOFError("Injector has closed the communication") from e
 
-    def _recv_injector_result(self, cli_sock, index, view) -> InjectorResultMessage:
+    def _recv_into(self, cli_sock, recv_view):
         try:
-            num_bytes: int = cli_sock.recv_into(view[:])
+            num_bytes: int = cli_sock.recv_into(recv_view)
             if num_bytes == 0:
                 raise EOFError("Injector has closed the communication")
         except ConnectionResetError as e:
             raise EOFError("Injector has closed the communication") from e
-        cli_msg = InjectorResultMessage.from_buffer(view)
-        # display received data
-        if self._logger.isEnabledFor(logging.DEBUG):
-            self._logger.debug("[%d]Recv msg %s", index, pformat(cli_msg.repr_recv()))
-        return cli_msg
 
     def handle_client(self, cli_sock, cli_addr) -> WorkerStats:
         self.init_logger_worker()
@@ -94,12 +89,19 @@ class Worker(ProtectedContextManager):
 
             gen = self.fuzzer.gen()
 
-            # wait for first message from injector
-            cli_msg_bytes: bytearray = bytearray(InjectorResultMessage.size())
-            cli_msg_view = memoryview(cli_msg_bytes)
-            cli_msg = self._recv_injector_result(cli_sock, 0, cli_msg_view)
+            # Pre-allocate ONCE before loop
+            recv_buf = bytearray(InjectorResultMessage.size())
+            recv_view = memoryview(recv_buf)
+            msg = InjectorResultMessage.from_buffer(recv_buf)
+            result_view = ResultView(msg)
 
-            result = None
+            # wait for first message from injector
+            self._recv_into(cli_sock, recv_view)
+            result_view.invalidate()
+
+            if self._logger.isEnabledFor(logging.DEBUG):
+                self._logger.debug("[0]Recv msg %s", pformat(msg.repr_recv()))
+
             # store error if any
             # since we want to always display Client statistics in the finally block
             # but returning from finally erases the exception
@@ -108,12 +110,17 @@ class Worker(ProtectedContextManager):
             try:
                 begin = datetime.now()
                 cur_begin = begin
+                first_iteration = True
                 for index in count(start=1):
                     try:
-                        new_insn = gen.send(result)
+                        if first_iteration:
+                            new_insn = next(gen)
+                            first_iteration = False
+                        else:
+                            new_insn = gen.send(result_view)
                     except StopIteration:
-                        if result:
-                            csvlog.log(result.final)  # type: ignore[unreachable]
+                        if result_view.final is not None:
+                            csvlog.log(result_view.final)
                         break
 
                     if len(new_insn) > self._cache_dyna_insn_buf_size:
@@ -126,9 +133,9 @@ class Worker(ProtectedContextManager):
 
                     # previous execution result has been processed by fuzzer
                     # check for final and log
-                    if result:
-                        # mypy issue: https://github.com/python/mypy/issues/8721
-                        csvlog.log(result.final)  # type: ignore[unreachable]
+                    if result_view.final is not None:
+                        csvlog.log(result_view.final)
+
                     # print current insn
                     if not index % self._cache_dyna_refresh_frequency:
                         cur_end = datetime.now()
@@ -142,29 +149,25 @@ class Worker(ProtectedContextManager):
                         # send new insn to injector
                         self._send_instruction(cli_sock, index, new_insn)
                         # get execution result
-                        cli_msg = self._recv_injector_result(cli_sock, index, cli_msg_view)
+                        self._recv_into(cli_sock, recv_view)
+                        result_view.invalidate()
                     except EOFError:
                         self._logger.info("[%d]Injector has closed the communication", index)
                         break
 
-                    result = FuzzerExecResult.factory_from_injector_message(cli_msg)
+                    if self._logger.isEnabledFor(logging.DEBUG):
+                        self._logger.debug("[%d]Recv msg %s", index, pformat(msg.repr_recv()))
+
                     # sanity check
-                    if result.rep_length is None:
+                    if result_view.rep_length is None:
                         self._logger.info(
                             "[%d]Impossible length recorded by CPU on VMEXIT for %s: %i",
                             index,
                             new_insn.hex(),
-                            cli_msg.insn_length,
+                            msg.insn_length,
                         )
-                    if self._logger.isEnabledFor(logging.DEBUG):
-                        self._logger.debug("[%d]FuzzerExecResult: %s", index, pformat(asdict(result)))
-                    # update exitstats
-                    if result.exit_reason == ExitReasonEnum.UNKNOWN:
-                        self._exitstats[f"unknown_exit_{cli_msg.reason}"] += 1
-                    else:
-                        self._exitstats[result.exit_reason] += 1
-                    # update stats
-                    self._stats[result.type_str()] += 1
+                    # update exitstats — raw int key, format at display time
+                    self._exitstats[msg.reason] += 1
             except Exception as e:
                 error = e
             else:
