@@ -1,16 +1,19 @@
 # Copyright (C) 2022 Intel Corporation
 # SPDX-License-Identifier: MIT
 
+from __future__ import annotations
+
 import logging
+import queue as queue_mod
 from datetime import datetime
 from itertools import count
 from pathlib import Path
-from typing import Counter
+from typing import Any, Counter, List
 
 from attr import define, field
 
 from vmsifter.config import settings
-from vmsifter.fuzzer.types import AbstractInsnGenerator, ResultView
+from vmsifter.fuzzer.types import AbstractInsnGenerator, ResultView, Splittable
 from vmsifter.injector.types import InjectorResultMessage
 from vmsifter.output import CSVOutput
 from vmsifter.utils import pformat
@@ -27,7 +30,29 @@ class WorkerStats:
 
     @property
     def exec_speed(self) -> int:
+        if self.total_seconds == 0:
+            return 0
         return int(self.nb_insn / self.total_seconds)
+
+
+def _merge_worker_stats(stats_list: List[WorkerStats]) -> WorkerStats:
+    """Merge stats from multiple ranges processed by a single worker. Pure function."""
+    total_insn = sum(s.nb_insn for s in stats_list)
+    total_seconds = sum(s.total_seconds for s in stats_list)
+    general: Counter = Counter()
+    exitstats: Counter = Counter()
+    interruptstats: Counter = Counter()
+    for s in stats_list:
+        general += s.general
+        exitstats += s.exitstats
+        interruptstats += s.interruptstats
+    return WorkerStats(
+        nb_insn=total_insn,
+        total_seconds=total_seconds,
+        general=general,
+        exitstats=exitstats,
+        interruptstats=interruptstats,
+    )
 
 
 class Worker(ProtectedContextManager):
@@ -81,30 +106,106 @@ class Worker(ProtectedContextManager):
         except ConnectionResetError as e:
             raise EOFError("Injector has closed the communication") from e
 
-    def handle_client(self, cli_sock, cli_addr) -> WorkerStats:
+    def handle_client(
+        self,
+        cli_sock,
+        cli_addr,
+        work_queue: Any = None,
+        idle_event: Any = None,
+        split_event: Any = None,
+    ) -> WorkerStats:
+        """Run fuzzer ranges until no more work is available.
+
+        Without queue/events: legacy single-range behavior (unchanged).
+        With queue/events: runs current range, then waits for new work from scheduler.
+        """
         self.init_logger_worker()
         self._logger.debug("Injector connected: %s", cli_addr)
+
+        # Pre-allocate ONCE before loop -- reused across all ranges
+        recv_buf = bytearray(InjectorResultMessage.size())
+        recv_view = memoryview(recv_buf)
+        msg = InjectorResultMessage.from_buffer(recv_buf)
+        result_view = ResultView(msg)
+
+        # Wait for initial injector handshake (once, reused across ranges)
+        self._recv_into(cli_sock, recv_view)
+        result_view.invalidate()
+
+        if self._logger.isEnabledFor(logging.DEBUG):
+            self._logger.debug("[0]Recv msg %s", pformat(msg.repr_recv()))
+
+        all_stats: List[WorkerStats] = []
+
+        while True:
+            stats = self._run_single_range(
+                cli_sock,
+                recv_view,
+                msg,
+                result_view,
+                work_queue,
+                split_event,
+            )
+            all_stats.append(stats)
+
+            # Legacy mode (no queue): exit after single range
+            if work_queue is None or idle_event is None:
+                break
+
+            # Signal idle, poll for new work with short timeouts
+            # (short timeouts keep the worker responsive to CTRL-C;
+            #  broad except catches Manager proxy errors on shutdown)
+            self._logger.info("Range exhausted, waiting for new work...")
+            try:
+                idle_event.set()
+            except Exception:
+                break
+            got_work = False
+            for _ in range(120):  # 120 * 0.5s = 60s max wait
+                try:
+                    new_fuzzer = work_queue.get(timeout=0.5)
+                except queue_mod.Empty:
+                    continue
+                except Exception:
+                    # Manager died (CTRL-C shutdown) — exit cleanly
+                    break
+                if new_fuzzer is None:
+                    # Sentinel: scheduler says no more work available
+                    break
+                self._fuzzer = new_fuzzer
+                try:
+                    idle_event.clear()
+                except Exception:
+                    pass
+                self._logger.info("Picked up new range: %s", self._fuzzer.str_fuzzing_range())
+                got_work = True
+                break
+            if not got_work:
+                self._logger.info("No more work available, exiting.")
+                break
+
+        return _merge_worker_stats(all_stats)
+
+    def _run_single_range(
+        self,
+        cli_sock,
+        recv_view: memoryview,
+        msg: InjectorResultMessage,
+        result_view: ResultView,
+        work_queue: Any = None,
+        split_event: Any = None,
+    ) -> WorkerStats:
+        """Execute one fuzzer range to completion. Inner logic extracted from handle_client."""
+        # Reset per-range stats
+        self._stats = Counter()
+        self._exitstats = Counter()
+        self._interruptstats = Counter()
+
         with CSVOutput(self._id) as csvlog:
             self._logger.info("Fuzzing range: %s", self.fuzzer.str_fuzzing_range())
 
             gen = self.fuzzer.gen()
 
-            # Pre-allocate ONCE before loop
-            recv_buf = bytearray(InjectorResultMessage.size())
-            recv_view = memoryview(recv_buf)
-            msg = InjectorResultMessage.from_buffer(recv_buf)
-            result_view = ResultView(msg)
-
-            # wait for first message from injector
-            self._recv_into(cli_sock, recv_view)
-            result_view.invalidate()
-
-            if self._logger.isEnabledFor(logging.DEBUG):
-                self._logger.debug("[0]Recv msg %s", pformat(msg.repr_recv()))
-
-            # store error if any
-            # since we want to always display Client statistics in the finally block
-            # but returning from finally erases the exception
             error = None
 
             try:
@@ -136,7 +237,7 @@ class Worker(ProtectedContextManager):
                     if result_view.final is not None:
                         csvlog.log(result_view.final)
 
-                    # print current insn
+                    # print current insn + split checkpoint
                     if not index % self._cache_dyna_refresh_frequency:
                         cur_end = datetime.now()
                         total_sec = (cur_end - cur_begin).total_seconds()
@@ -144,6 +245,18 @@ class Worker(ProtectedContextManager):
                         self._logger.info("[%d]insn: %s | %s exec/sec", index, self.fuzzer, cur_speed)
                         # update current
                         cur_begin = datetime.now()
+
+                        # Split checkpoint: check if scheduler requested a split
+                        if split_event is not None and split_event.is_set() and isinstance(self._fuzzer, Splittable):
+                            split_event.clear()
+                            new_fuzzer = self._fuzzer.split_remaining()
+                            if new_fuzzer is not None and work_queue is not None:
+                                work_queue.put(new_fuzzer)
+                                self._logger.info(
+                                    "Split: keeping %s, donated %s",
+                                    self._fuzzer.str_fuzzing_range(),
+                                    new_fuzzer.str_fuzzing_range(),
+                                )
 
                     try:
                         # send new insn to injector
@@ -166,7 +279,7 @@ class Worker(ProtectedContextManager):
                             new_insn.hex(),
                             msg.insn_length,
                         )
-                    # update exitstats — raw int key, format at display time
+                    # update exitstats -- raw int key, format at display time
                     self._exitstats[msg.reason] += 1
             except Exception as e:
                 error = e

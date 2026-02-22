@@ -9,6 +9,7 @@ from attrs import define, field
 from vmsifter.config import settings
 from vmsifter.fuzzer.partition import X86Range
 from vmsifter.fuzzer.partition import partition as utils_partition
+from vmsifter.fuzzer.split import split_range_midpoint
 from vmsifter.fuzzer.types import (
     _HW_EXC_TYPE,
     _NMI_REASON,
@@ -163,6 +164,33 @@ class TunnelFuzzer(AbstractInsnGenerator):
         self.last_complete_snapshot = view.snapshot()
         self.last_complete_fingerprint = view.fingerprint
         return length
+
+    def split_remaining(self) -> Optional["TunnelFuzzer"]:
+        """Split remaining work in half at current position.
+
+        Shrinks self to lower half, returns new TunnelFuzzer for upper half.
+        """
+        result = split_range_midpoint(self.view[0], self.end_first_byte_int)
+        if result is None:
+            return None
+
+        # New fuzzer for upper half
+        new_fuzzer = TunnelFuzzer(
+            insn_buffer=bytearray([result.upper_start]),
+            end_first_byte=result.upper_end.to_bytes(1, byteorder="big"),
+        )
+
+        # Shrink self to lower half
+        self.end_first_byte = result.lower_end.to_bytes(1, byteorder="big")
+        self.end_first_byte_int = result.lower_end
+        x86range = X86Range(bytes(self.insn_buffer), self.end_first_byte)
+        self.byterange_completion = ByteRangeCompletion.from_x86_range(x86range)
+
+        return new_fuzzer
+
+    def remaining_range_size(self) -> int:
+        """Return the remaining first-byte range size."""
+        return max(0, self.end_first_byte_int - self.view[0])
 
     def gen(self) -> Generator[memoryview, ResultView, None]:
         # suppress: catch _increment_last_byte StopIteration

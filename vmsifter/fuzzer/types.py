@@ -3,7 +3,7 @@
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Generator, List, Optional, Tuple, Union
+from typing import Any, Generator, List, Optional, Protocol, Tuple, Union, runtime_checkable
 
 from attr import define, evolve, field
 
@@ -357,3 +357,15 @@ class FinalLogResult:
     insn: str
     len: int
     misc: str = ""
+
+
+@runtime_checkable
+class Splittable(Protocol):
+    """Structural protocol for fuzzers that support dynamic mid-execution splitting.
+
+    Any class implementing these two methods satisfies the protocol -- no inheritance needed.
+    """
+
+    def split_remaining(self) -> Optional["AbstractInsnGenerator"]: ...  # noqa: E704
+
+    def remaining_range_size(self) -> int: ...  # noqa: E704

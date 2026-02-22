@@ -213,6 +213,100 @@ def test_backward_search():
     assert list(insn_4) == [0x00, 0xC0]
 
 
+# ── split_remaining / remaining_range_size tests ──
+
+
+@pytest.fixture(autouse=False)
+def _reset_prefix_settings():
+    """Ensure min_prefix_count is reset for split tests that create 1-byte buffers."""
+    old_min = settings.min_prefix_count
+    old_max = settings.max_prefix_count
+    settings.min_prefix_count = 0
+    settings.max_prefix_count = 0
+    settings.prefix_range = range(0, 1)
+    yield
+    settings.min_prefix_count = old_min
+    settings.max_prefix_count = old_max
+    settings.prefix_range = range(old_min, old_max + 1)
+
+
+@pytest.mark.usefixtures("_reset_prefix_settings")
+def test_split_remaining_halves_range():
+    tun = TunnelFuzzer(insn_buffer=bytearray([0x00]), end_first_byte=b"\xFF")
+    new = tun.split_remaining()
+    assert new is not None
+    assert tun.end_first_byte_int == 0x7F  # self shrunk
+    assert new.insn_buffer[0] == 0x7F  # new starts at midpoint
+    assert new.end_first_byte == b"\xFF"  # new ends at original end
+
+
+@pytest.mark.usefixtures("_reset_prefix_settings")
+def test_split_remaining_too_small():
+    tun = TunnelFuzzer(insn_buffer=bytearray([0xFE]), end_first_byte=b"\xFF")
+    assert tun.split_remaining() is None
+
+
+@pytest.mark.usefixtures("_reset_prefix_settings")
+def test_split_remaining_preserves_marker():
+    tun = TunnelFuzzer(insn_buffer=bytearray([0x04, 0x05]), marker_idx=1, end_first_byte=b"\x40")
+    tun.split_remaining()
+    assert tun.marker_idx == 1  # unchanged
+
+
+@pytest.mark.usefixtures("_reset_prefix_settings")
+def test_split_result_picklable():
+    import pickle
+
+    tun = TunnelFuzzer(insn_buffer=bytearray([0x00]), end_first_byte=b"\xFF")
+    new = tun.split_remaining()
+    assert new is not None
+    roundtripped = pickle.loads(pickle.dumps(new))
+    assert roundtripped.insn_buffer[0] == new.insn_buffer[0]
+
+
+@pytest.mark.usefixtures("_reset_prefix_settings")
+def test_remaining_range_size():
+    tun = TunnelFuzzer(insn_buffer=bytearray([0x40]), end_first_byte=b"\x80")
+    assert tun.remaining_range_size() == 0x40
+
+
+@pytest.mark.usefixtures("_reset_prefix_settings")
+def test_remaining_range_size_zero():
+    tun = TunnelFuzzer(insn_buffer=bytearray([0x80]), end_first_byte=b"\x80")
+    assert tun.remaining_range_size() == 0
+
+
+@pytest.mark.usefixtures("_reset_prefix_settings")
+def test_split_updates_completion_tracker():
+    tun = TunnelFuzzer(insn_buffer=bytearray([0x00]), end_first_byte=b"\xFF")
+    old_end = tun.byterange_completion.range_end
+    tun.split_remaining()
+    # ByteRangeCompletion should have been recalculated with new (smaller) range
+    assert tun.byterange_completion.range_end != old_end
+
+
+@pytest.mark.usefixtures("_reset_prefix_settings")
+def test_splittable_protocol():
+    from vmsifter.fuzzer.types import Splittable
+
+    tun = TunnelFuzzer(insn_buffer=bytearray([0x00]), end_first_byte=b"\xFF")
+    assert isinstance(tun, Splittable)
+
+
+@pytest.mark.usefixtures("_reset_prefix_settings")
+def test_split_remaining_consecutive_splits():
+    """Multiple splits should keep shrinking the range."""
+    tun = TunnelFuzzer(insn_buffer=bytearray([0x00]), end_first_byte=b"\xFF")
+    split1 = tun.split_remaining()
+    assert split1 is not None
+    # tun is now [0x00, 0x7F], split1 is [0x7F, 0xFF]
+    split2 = tun.split_remaining()
+    assert split2 is not None
+    # tun is now [0x00, 0x3F], split2 is [0x3F, 0x7F]
+    assert tun.end_first_byte_int == 0x3F
+    assert split2.insn_buffer[0] == 0x3F
+
+
 @pytest.mark.skip(reason="infinite recursion since prefix added")
 def test_bump_10_insn():
     # arrange
