@@ -6,16 +6,14 @@ on:
   pull_request:
 
 env:
-  POETRY_VERSION: "1.8.3"
+  POETRY_VERSION: "2.1.1"
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     strategy:
       matrix:
-        # TODO: 'python:3.12.4-bullseye'
-        # only release for pypy as it's faster anyway
-        baseimage: ['pypy:3.10-7-slim-bookworm']
+        baseimage: ['python:3.13.2-slim-bookworm', 'pypy:3.11-7-slim-bookworm']
     steps:
       - uses: actions/checkout@v4
         with:

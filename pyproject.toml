@@ -66,6 +66,7 @@ line-length = 120
 exclude = '''
 /(
   | \.mypy_cache
+  | \.venv
   | xen
   | xtf
   | libvmi
@@ -75,11 +76,11 @@ exclude = '''
 [tool.isort]
 profile = "black"
 line_length = 120
-skip = ["xen/", "xtf/", "libvmi/"]
+skip = [".venv/", "xen/", "xtf/", "libvmi/"]
 
 [tool.flake8]
 max-line-length = 120
-exclude = ["xen/", "xtf/", "libvmi/", "tests/", "scripts/", "docs/"]
+exclude = [".venv/", "xen/", "xtf/", "libvmi/", "tests/", "scripts/", "docs/"]
 # https://black.readthedocs.io/en/stable/faq.html#why-are-flake8-s-e203-and-w503-violated
 ignore = ["E203", "W503"]
 

@@ -1,7 +1,7 @@
 # Copyright (C) 2022 Intel Corporation
 # SPDX-License-Identifier: MIT
 
-ARG BASEIMAGE=pypy:3.10-7-slim-bookworm
+ARG BASEIMAGE=pypy:3.11-7-slim-bookworm
 ARG BUILD_ID=""
 FROM ${BASEIMAGE} AS vmsifter-deps
 LABEL build=${BUILD_ID}
@@ -19,9 +19,8 @@ apt-get install -y --no-install-recommends \
   python3 python3-dev python3-setuptools \
   iasl uuid-dev libncurses-dev \
   pkg-config libglib2.0-dev libpixman-1-dev \
-  libyajl-dev flex bison ninja-build curl rsync cmake \
-  flex bison libglib2.0-dev libjson-c-dev libyajl-dev \
-  rsync python3-pip sudo ccache dmidecode
+  libyajl-dev flex bison ninja-build curl cmake libjson-c-dev \
+  rsync python3-pip sudo ccache dmidecode libgcc-11-dev
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 EOF
@@ -57,6 +56,8 @@ WORKDIR /code/xen
 
 RUN --mount=type=cache,target=/root/.ccache <<EOF
 set -e
+# python 3.13 lacks distutils
+pip install wheel setuptools
 make distclean
 patch -p1 < ../patches/0001-xen-x86-Make-XEN_DOMCTL_get_vcpu_msrs-more-configura.patch
 patch -p1 < ../patches/0003-xen-x86-monitor-report-extra-vmexit-information.patch
@@ -113,7 +114,7 @@ ninja -C build install
 EOF
 
 FROM ${BASEIMAGE} AS python-base
-ARG POETRY_VERSION="1.8.3"
+ARG POETRY_VERSION="2.1.1"
 
 COPY --from=vmsifter-xtf-builder /code/xtf-install/code/xtf/  /code/xtf/
 COPY --from=vmsifter-xen-builder /code/xen-install/ /code/xen-install/
@@ -123,19 +124,20 @@ COPY --from=vmsifter-injector-builder /usr/local/bin/injector /usr/local/bin/inj
 RUN <<EOF
 set -e
 apt-get update && apt-get install --no-install-recommends -y \
-  rsync curl sudo dmidecode libyajl-dev \
+  build-essential rsync curl sudo dmidecode libyajl-dev \
   libjson-c-dev libglib2.0-dev libpixman-1-dev
 rsync -au /code/xen-install/ /
 rsync -au /code/libvmi-install/ /usr/local/
 # cleanup
 apt-get upgrade -y
-apt-get remove -y linux-libc-dev
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 EOF
 
 # ensure xl is setuid
 RUN chmod u+s /usr/local/sbin/xl
+# ensure injector is setuid to access xc interface
+RUN chmod u+s /usr/local/bin/injector
 
 # setup python env vars
 ENV PYTHONUNBUFFERED=1 \

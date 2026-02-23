@@ -9,7 +9,7 @@ from .csv import CsvFuzzer
 from .drizzler import DrizzlerFuzzer
 from .random import RandomFuzzer
 from .tunnel import TunnelFuzzer
-from .types import EPT, NMI, AbstractInsnGenerator, FinalLogResult, FuzzerExecResult, Interrupted, Other
+from .types import AbstractInsnGenerator, FinalLogResult, ResultSnapshot, ResultView
 
 MAP_CONFIG_FUZZER: Dict[FuzzerType, Type[AbstractInsnGenerator]] = {
     FuzzerType.RANDOM: RandomFuzzer,
@@ -36,4 +36,4 @@ def get_injector_settings() -> str:
     return MAP_INJECTOR_SETTINGS[settings.fuzzer_mode]
 
 
-__all__ = ["AbstractInsnGenerator", "FuzzerExecResult", "FinalLogResult", "Interrupted", "EPT", "NMI", "Other"]
+__all__ = ["AbstractInsnGenerator", "FinalLogResult", "ResultView", "ResultSnapshot"]
