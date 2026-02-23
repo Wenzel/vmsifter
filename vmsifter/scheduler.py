@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Set, Tuple
 
 from attrs import define
 
@@ -22,6 +22,11 @@ class WorkerSlot:
     active: bool = True
 
 
+# Number of poll cycles (× 0.5s each) to wait for a split to complete
+# before declaring it failed and trying the next donor.
+_SPLIT_GRACE_POLLS = 10  # 5 seconds
+
+
 class WorkScheduler:
     """Coordinates dynamic work redistribution.
 
@@ -33,6 +38,10 @@ class WorkScheduler:
         self._logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
         self._work_queue = work_queue
         self._slots: Dict[int, WorkerSlot] = {}
+        # Pending split: idle_worker_id -> (donor_worker_id, polls_remaining)
+        self._pending_split: Dict[int, Tuple[int, int]] = {}
+        # Donors that failed to produce work: idle_worker_id -> {donor_ids}
+        self._failed_donors: Dict[int, Set[int]] = {}
 
     def register_worker(
         self,
@@ -50,9 +59,18 @@ class WorkScheduler:
 
     def unregister_worker(self, worker_id: int) -> None:
         self._slots.pop(worker_id, None)
+        self._pending_split.pop(worker_id, None)
+        self._failed_donors.pop(worker_id, None)
 
     def poll_and_redistribute(self) -> None:
         """Check for idle workers and trigger splits. Called periodically by executor."""
+        # Clean up resolved pending splits (idle workers that picked up work)
+        for wid in list(self._pending_split):
+            slot = self._slots.get(wid)
+            if slot is None or not slot.idle_event.is_set():
+                self._pending_split.pop(wid, None)
+                self._failed_donors.pop(wid, None)
+
         idle_slots = []
         for slot in list(self._slots.values()):
             if slot.active and slot.idle_event.is_set():
@@ -75,23 +93,53 @@ class WorkScheduler:
                 slot.active = False
 
     def _handle_idle(self, idle_slot: WorkerSlot) -> None:
+        wid = idle_slot.worker_id
+
+        # Check pending split request
+        if wid in self._pending_split:
+            donor_id, polls_left = self._pending_split[wid]
+            donor_slot = self._slots.get(donor_id)
+            donor_busy = donor_slot is not None and donor_slot.active and not donor_slot.idle_event.is_set()
+
+            if donor_busy and polls_left > 0:
+                # Still waiting for donor to process the split
+                self._pending_split[wid] = (donor_id, polls_left - 1)
+                return
+
+            # Timed out or donor finished — split produced no work
+            del self._pending_split[wid]
+            self._failed_donors.setdefault(wid, set()).add(donor_id)
+            self._logger.info(
+                "Split from Worker %s produced no work for idle Worker %s",
+                donor_id,
+                wid,
+            )
+
+        # Find new donor, excluding previously failed ones
+        failed = self._failed_donors.get(wid, set())
         candidates = [
             DonorCandidate(s.worker_id, s.original_range_size)
             for s in self._slots.values()
-            if s.active and not s.idle_event.is_set()
+            if s.active and not s.idle_event.is_set() and s.worker_id not in failed
         ]
-        donor_id = select_best_donor(candidates, exclude_id=idle_slot.worker_id)
+        donor_id = select_best_donor(candidates, exclude_id=wid)
+
         if donor_id is None:
-            self._logger.info("No donor available for Worker %s", idle_slot.worker_id)
+            # No viable donors left — send sentinel so worker exits cleanly
+            self._logger.info("No viable donor for Worker %s, sending stop", wid)
+            self._work_queue.put(None)
+            idle_slot.active = False
+            self._failed_donors.pop(wid, None)
             return
 
         donor_slot = self._slots[donor_id]
         self._logger.info(
             "Requesting split from Worker %s for idle Worker %s",
-            donor_slot.worker_id,
-            idle_slot.worker_id,
+            donor_id,
+            wid,
         )
         donor_slot.split_event.set()
+        self._pending_split[wid] = (donor_id, _SPLIT_GRACE_POLLS)
 
     def mark_done(self, worker_id: int) -> None:
         slot = self._slots.get(worker_id)
