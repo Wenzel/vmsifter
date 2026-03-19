@@ -14,3 +14,8 @@ try:
     from bench.backends import capstone_be  # noqa: F401
 except ImportError:
     pass
+
+try:
+    from bench.backends import unicorn_be  # noqa: F401
+except ImportError:
+    pass

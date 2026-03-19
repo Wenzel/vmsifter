@@ -12,6 +12,7 @@ docker = ">=7.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=7.0"
+unicorn = "^2.1.4"
 
 [tool.poetry.scripts]
 vmsifter-bench = "bench.cli:main"
