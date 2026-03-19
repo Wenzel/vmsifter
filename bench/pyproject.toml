@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "vmsifter-bench"
+version = "0.1.0"
+description = "Replay x86 instruction catalogs through decoder/emulator backends"
+authors = []
+packages = [{include = "bench"}]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<4.0"
+click = ">=8.0"
+cffi = ">=1.16"
+docker = ">=7.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=7.0"
+
+[tool.poetry.scripts]
+vmsifter-bench = "bench.cli:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
