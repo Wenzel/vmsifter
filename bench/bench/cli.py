@@ -1,5 +1,7 @@
 """Click CLI for vmsifter-bench."""
 
+import logging
+import sys
 from pathlib import Path
 
 import click
@@ -10,8 +12,15 @@ from bench.runner import run as run_backend
 
 
 @click.group()
-def main() -> None:
+@click.option("--debug", "-d", is_flag=True, default=False, help="Enable debug logging.")
+@click.pass_context
+def main(ctx: click.Context, debug: bool) -> None:
     """vmsifter-bench — replay instruction catalogs through decoder/emulator backends."""
+    logging.basicConfig(
+        level=logging.DEBUG if debug else logging.INFO,
+        format="%(name)s %(levelname)s %(message)s",
+        stream=sys.stderr,
+    )
 
 
 @main.command()

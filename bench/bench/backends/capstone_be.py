@@ -1,9 +1,13 @@
 """Capstone disassembler decoder backend."""
 
+import logging
+
 import capstone
 
 from bench.backends.base import register
 from bench.schema import Backend, BackendResult
+
+logger = logging.getLogger(__name__)
 
 _MODE_MAP = {
     32: capstone.CS_MODE_32,
@@ -20,6 +24,7 @@ class CapstoneBackend(Backend):
         if exec_mode not in _MODE_MAP:
             raise ValueError(f"Unsupported exec_mode {exec_mode}; expected 32 or 64")
         self._exec_mode = exec_mode
+        logger.debug("Capstone init: mode=%d-bit", exec_mode)
         self._md = capstone.Cs(capstone.CS_ARCH_X86, _MODE_MAP[exec_mode])
 
     def process(self, insn_bytes: bytes) -> BackendResult:

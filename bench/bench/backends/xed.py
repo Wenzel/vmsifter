@@ -1,9 +1,13 @@
 """Intel XED decoder backend using CFFI bindings."""
 
+import logging
+
 from _xed_cffi import ffi, lib  # type: ignore[import-not-found]
 
 from bench.backends.base import register
 from bench.schema import Backend, BackendResult
+
+logger = logging.getLogger(__name__)
 
 _MODE_MAP = {
     32: (lib.XED_MACHINE_MODE_LEGACY_32, lib.XED_ADDRESS_WIDTH_32b),
@@ -39,6 +43,7 @@ class XedBackend(Backend):
         if exec_mode not in _MODE_MAP:
             raise ValueError(f"Unsupported exec_mode {exec_mode}; expected 32 or 64")
         self._exec_mode = exec_mode
+        logger.debug("XED init: mode=%d-bit", exec_mode)
         lib.xed_tables_init()
         self._state = ffi.new("xed_state_t *")
         self._xedd = ffi.new("xed_decoded_inst_t *")

@@ -2,10 +2,12 @@
 
 import csv
 import json
-import sys
+import logging
 from pathlib import Path
 
 from bench.schema import Backend
+
+logger = logging.getLogger(__name__)
 
 OUTPUT_COLUMNS = [
     "insn",
@@ -26,6 +28,7 @@ def run(
     output_path: Path,
 ) -> None:
     """Read input CSV, process each instruction through backend, write output CSV."""
+    logger.info("Processing %s → %s (%d-bit)", input_path, output_path, exec_mode)
     _process(input_path, backend, exec_mode, output_path)
 
 
@@ -41,7 +44,7 @@ def _process(
     ):
         reader = csv.DictReader(inf)
         if "insn" not in (reader.fieldnames or []):
-            print(f"Error: input CSV missing 'insn' column", file=sys.stderr)
+            logger.error("Input CSV missing 'insn' column")
             raise SystemExit(1)
 
         writer = csv.DictWriter(outf, fieldnames=OUTPUT_COLUMNS)
@@ -53,6 +56,7 @@ def _process(
                 continue
             insn_bytes = bytes.fromhex(insn_hex)
             result = backend.process(insn_bytes)
+            logger.debug("insn=%s valid=%s len=%s", insn_hex, result.valid, result.length)
 
             writer.writerow({
                 "insn": insn_hex,

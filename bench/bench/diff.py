@@ -1,8 +1,11 @@
 """Two-CSV join-and-compare on the 'insn' column."""
 
 import csv
+import logging
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_COMPARE_COLUMNS = ["valid", "length", "exit_type"]
 
@@ -20,6 +23,7 @@ def diff(
     if compare_columns is None:
         compare_columns = DEFAULT_COMPARE_COLUMNS
 
+    logger.info("Comparing %s vs %s on columns %s", left_path, right_path, compare_columns)
     right_index = _index_csv(right_path)
 
     diff_count = 0
@@ -58,6 +62,7 @@ def diff(
                         differs = True
 
                 if differs:
+                    logger.debug("diff insn=%s", insn)
                     writer.writerow(out_row)
                     diff_count += 1
     finally:
