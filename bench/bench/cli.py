@@ -29,14 +29,14 @@ def run(
     output_file: Path | None,
 ) -> None:
     """Run a backend on an instruction catalog CSV."""
-    backend = get_backend(backend_name)
     mode = int(exec_mode)
 
     if output_file is None:
         output_file = output_dir / f"results_{backend_name}.csv"
 
     click.echo(f"Backend: {backend_name} | Mode: {mode}-bit | Input: {input_path}")
-    run_backend(input_path, backend, mode, output_file)
+    with get_backend(backend_name, exec_mode=mode) as backend:
+        run_backend(input_path, backend, mode, output_file)
     click.echo(f"Output: {output_file}")
 
 
@@ -62,5 +62,5 @@ def backends_cmd() -> None:
         click.echo("No backends available.")
         return
     for name in names:
-        backend = get_backend(name)
+        backend = get_backend(name, exec_mode=64)
         click.echo(f"  {name} ({backend.kind})")

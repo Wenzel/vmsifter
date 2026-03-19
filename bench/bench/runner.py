@@ -26,11 +26,7 @@ def run(
     output_path: Path,
 ) -> None:
     """Read input CSV, process each instruction through backend, write output CSV."""
-    backend.setup()
-    try:
-        _process(input_path, backend, exec_mode, output_path)
-    finally:
-        backend.teardown()
+    _process(input_path, backend, exec_mode, output_path)
 
 
 def _process(
@@ -56,7 +52,7 @@ def _process(
             if not insn_hex:
                 continue
             insn_bytes = bytes.fromhex(insn_hex)
-            result = backend.process(insn_bytes, exec_mode)
+            result = backend.process(insn_bytes)
 
             writer.writerow({
                 "insn": insn_hex,

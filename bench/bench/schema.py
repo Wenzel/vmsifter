@@ -22,12 +22,21 @@ class Backend(ABC):
     kind: str  # "decoder" or "emulator"
 
     @abstractmethod
-    def process(self, insn_bytes: bytes, exec_mode: int) -> BackendResult:
+    def __init__(self, exec_mode: int) -> None:
+        """Initialize the backend for the given execution mode (32 or 64)."""
+        ...
+
+    @abstractmethod
+    def process(self, insn_bytes: bytes) -> BackendResult:
         """Process a single instruction. Must be stateless between calls."""
         ...
 
-    def setup(self) -> None:
-        """One-time initialization (load libraries, allocate state, etc.)."""
+    def close(self) -> None:
+        """Cleanup. Override to release resources."""
 
-    def teardown(self) -> None:
-        """Cleanup."""
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False

@@ -16,24 +16,18 @@ class XedBackend(Backend):
     name = "xed"
     kind = "decoder"
 
-    def setup(self) -> None:
+    def __init__(self, exec_mode: int) -> None:
+        if exec_mode not in _MODE_MAP:
+            raise ValueError(f"Unsupported exec_mode {exec_mode}; expected 32 or 64")
+        self._exec_mode = exec_mode
         lib.xed_tables_init()
         self._state = ffi.new("xed_state_t *")
         self._xedd = ffi.new("xed_decoded_inst_t *")
         self._buf = ffi.new("char[256]")
-        self._mode: int | None = None
-
-    def _set_mode(self, exec_mode: int) -> None:
-        if exec_mode not in _MODE_MAP:
-            raise ValueError(f"Unsupported exec_mode {exec_mode}; expected 32 or 64")
         machine_mode, addr_width = _MODE_MAP[exec_mode]
         lib.xed_state_init2(self._state, machine_mode, addr_width)
-        self._mode = exec_mode
 
-    def process(self, insn_bytes: bytes, exec_mode: int) -> BackendResult:
-        if exec_mode != self._mode:
-            self._set_mode(exec_mode)
-
+    def process(self, insn_bytes: bytes) -> BackendResult:
         lib.xed_decoded_inst_zero_set_mode(self._xedd, self._state)
         err = lib.xed_decode(self._xedd, insn_bytes, len(insn_bytes))
 
@@ -62,8 +56,7 @@ class XedBackend(Backend):
             misc={"asm": asm} if asm else None,
         )
 
-    def teardown(self) -> None:
+    def close(self) -> None:
         self._state = None
         self._xedd = None
         self._buf = None
-        self._mode = None

@@ -11,12 +11,12 @@ def register(cls: type[Backend]) -> type[Backend]:
     return cls
 
 
-def get_backend(name: str) -> Backend:
+def get_backend(name: str, exec_mode: int = 64) -> Backend:
     """Instantiate a registered backend by name."""
     if name not in _registry:
         available = ", ".join(sorted(_registry)) or "(none)"
         raise KeyError(f"Unknown backend {name!r}. Available: {available}")
-    return _registry[name]()
+    return _registry[name](exec_mode)
 
 
 def list_backends() -> list[str]:
