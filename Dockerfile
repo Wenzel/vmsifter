@@ -91,6 +91,17 @@ cmake --build /code/libvmi/build --parallel "$(nproc)"
 cmake --install /code/libvmi/build
 EOF
 
+FROM vmsifter-deps AS vmsifter-xed-builder
+
+# setup XED
+RUN <<EOF
+git clone https://github.com/intelxed/xed.git -b v2024.05.20
+git clone https://github.com/intelxed/mbuild.git -b v2024.05.05
+cd xed
+./mfile.py install
+mv kits/* /root/xedkit
+EOF
+
 
 FROM vmsifter-deps AS vmsifter-injector-builder
 LABEL build=${BUILD_ID}
@@ -98,11 +109,14 @@ LABEL build=${BUILD_ID}
 COPY --from=vmsifter-xtf-builder /code/xtf-install/code/xtf/  /code/xtf/
 COPY --from=vmsifter-xen-builder /code/xen-install/ /code/xen-install/
 COPY --from=vmsifter-libvmi-builder /code/libvmi-install/ /code/libvmi-install/
+COPY --from=vmsifter-xed-builder /root/xedkit/ /root/xedkit/
 RUN <<EOF
 set -e
 rsync -au /code/xen-install/ /
 rsync -au /code/libvmi-install/ /usr/local/
 EOF
+
+
 
 # setup injector
 COPY ./src/ /code/src/
@@ -120,6 +134,7 @@ COPY --from=vmsifter-xtf-builder /code/xtf-install/code/xtf/  /code/xtf/
 COPY --from=vmsifter-xen-builder /code/xen-install/ /code/xen-install/
 COPY --from=vmsifter-libvmi-builder /code/libvmi-install/ /code/libvmi-install/
 COPY --from=vmsifter-injector-builder /usr/local/bin/injector /usr/local/bin/injector
+COPY --from=vmsifter-injector-builder /usr/local/bin/xed_injector /usr/local/bin/xed_injector
 
 RUN <<EOF
 set -e
