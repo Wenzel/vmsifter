@@ -61,3 +61,27 @@ def test_disassembly_in_misc(xed):
     result = xed.process(b"\x90")
     if result.misc:
         assert "asm" in result.misc
+
+
+def test_nop_no_reg_writes(xed):
+    result = xed.process(b"\x90")
+    assert result.valid is True
+    assert result.reg_delta is None
+
+
+def test_mov_reg_writes(xed):
+    # MOV EAX, 0 → b8 00 00 00 00
+    result = xed.process(b"\xb8\x00\x00\x00\x00")
+    assert result.valid is True
+    assert result.reg_delta is not None
+    written = set(result.reg_delta.split())
+    assert "eax" in written or "rax" in written
+
+
+def test_push_writes_rsp(xed):
+    # PUSH RAX → 0x50
+    result = xed.process(b"\x50")
+    assert result.valid is True
+    assert result.reg_delta is not None
+    written = set(result.reg_delta.split())
+    assert "rsp" in written

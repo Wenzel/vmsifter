@@ -10,6 +10,25 @@ _MODE_MAP = {
     64: (lib.XED_MACHINE_MODE_LONG_64, lib.XED_ADDRESS_WIDTH_64b),
 }
 
+_WRITE_ACTIONS = frozenset({
+    lib.XED_OPERAND_ACTION_W,
+    lib.XED_OPERAND_ACTION_RW,
+    lib.XED_OPERAND_ACTION_RCW,
+    lib.XED_OPERAND_ACTION_CW,
+})
+
+_REG_SLOTS = frozenset({
+    lib.XED_OPERAND_REG0,
+    lib.XED_OPERAND_REG1,
+    lib.XED_OPERAND_REG2,
+    lib.XED_OPERAND_REG3,
+    lib.XED_OPERAND_REG4,
+    lib.XED_OPERAND_REG5,
+    lib.XED_OPERAND_REG6,
+    lib.XED_OPERAND_REG7,
+    lib.XED_OPERAND_REG8,
+})
+
 
 @register
 class XedBackend(Backend):
@@ -49,12 +68,34 @@ class XedBackend(Backend):
         ):
             asm = ffi.string(self._buf).decode()
 
+        reg_delta = self._written_registers()
+
         return BackendResult(
             valid=True,
             length=length,
             exit_type="valid",
+            reg_delta=reg_delta,
             misc={"asm": asm} if asm else None,
         )
+
+    def _written_registers(self) -> str | None:
+        """Return space-joined sorted register names written by the decoded instruction."""
+        inst = lib.xed_decoded_inst_inst(self._xedd)
+        nops = lib.xed_inst_noperands(inst)
+        regs: set[str] = set()
+        for i in range(nops):
+            op = lib.xed_inst_operand(inst, i)
+            if lib.xed_operand_rw(op) not in _WRITE_ACTIONS:
+                continue
+            op_name = lib.xed_operand_name(op)
+            if op_name not in _REG_SLOTS:
+                continue
+            reg = lib.xed_decoded_inst_get_reg(self._xedd, op_name)
+            if reg == lib.XED_REG_INVALID:
+                continue
+            name = ffi.string(lib.xed_reg_enum_t2str(reg)).decode().lower()
+            regs.add(name)
+        return " ".join(sorted(regs)) if regs else None
 
     def close(self) -> None:
         self._state = None
