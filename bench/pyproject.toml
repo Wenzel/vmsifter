@@ -8,7 +8,6 @@ packages = [{include = "bench"}]
 [tool.poetry.dependencies]
 python = ">=3.11,<4.0"
 click = ">=8.0"
-cffi = ">=1.16"
 docker = ">=7.0"
 
 [tool.poetry.group.dev.dependencies]
