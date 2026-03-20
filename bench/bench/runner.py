@@ -5,6 +5,8 @@ import json
 import logging
 from pathlib import Path
 
+import rich.progress
+
 from bench.schema import Backend
 
 logger = logging.getLogger(__name__)
@@ -39,7 +41,7 @@ def _process(
     output_path: Path,
 ) -> None:
     with (
-        open(input_path, newline="") as inf,
+        rich.progress.open(input_path, "r", description="Processing") as inf,
         open(output_path, "w", newline="") as outf,
     ):
         reader = csv.DictReader(inf)

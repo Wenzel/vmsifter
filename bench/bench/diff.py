@@ -5,6 +5,8 @@ import logging
 import sys
 from pathlib import Path
 
+import rich.progress
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_COMPARE_COLUMNS = ["valid", "length", "exit_type"]
@@ -43,7 +45,7 @@ def diff(
         writer = csv.DictWriter(outf_handle, fieldnames=out_fieldnames)
         writer.writeheader()
 
-        with open(left_path, newline="") as lf:
+        with rich.progress.open(left_path, "r", description="Comparing") as lf:
             reader = csv.DictReader(lf)
             for row in reader:
                 insn = row["insn"].strip()
@@ -75,7 +77,7 @@ def diff(
 def _index_csv(path: Path) -> dict[str, dict[str, str]]:
     """Read a CSV into a dict keyed by the 'insn' column."""
     index: dict[str, dict[str, str]] = {}
-    with open(path, newline="") as f:
+    with rich.progress.open(path, "r", description="Indexing") as f:
         for row in csv.DictReader(f):
             insn = row["insn"].strip()
             index[insn] = row
