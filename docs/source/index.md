@@ -21,7 +21,10 @@ Framework for in-VM test execution and monitoring. Inspired by [Sandsifter](http
 :maxdepth: 2
 :caption: Reference
 
+reference/architecture
+reference/vision
 reference/configuration
+reference/xen-patches
 ```
 
 ```{toctree}
