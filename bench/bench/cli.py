@@ -54,12 +54,14 @@ def run(
 @click.option("-i", "--input", "input_path", required=True, type=click.Path(exists=True, path_type=Path))
 @click.option("-b", "--backend", "backend_name", required=True, type=str)
 @click.option("--exec-mode", type=click.Choice(["32", "64"]), default="64", show_default=True)
-def validate(input_path: Path, backend_name: str, exec_mode: str) -> None:
+@click.option("-o", "--output", "output_path", type=click.Path(path_type=Path), default=None,
+              help="Optional JSON file to write discrepant rows to.")
+def validate(input_path: Path, backend_name: str, exec_mode: str, output_path: Path | None) -> None:
     """Validate an input CSV against a backend without writing a results file."""
     mode = int(exec_mode)
     click.echo(f"Backend: {backend_name} | Mode: {mode}-bit | Input: {input_path}")
     try:
-        validate_backend_in_docker(input_path, backend_name, mode)
+        validate_backend_in_docker(input_path, backend_name, mode, output_path=output_path)
     except RuntimeError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo("Validation succeeded.")

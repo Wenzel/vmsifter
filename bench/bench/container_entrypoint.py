@@ -20,6 +20,7 @@ def parse_args() -> argparse.Namespace:
 
     validate_parser = subparsers.add_parser("validate", help="Validate input rows against a backend.")
     validate_parser.add_argument("--input", dest="input_path", type=Path, required=True)
+    validate_parser.add_argument("--output", dest="output_path", type=Path, default=None)
     validate_parser.add_argument("--backend", dest="backend_name", required=True)
     validate_parser.add_argument("--exec-mode", dest="exec_mode", type=int, choices=(32, 64), required=True)
     return parser.parse_args()
@@ -32,7 +33,7 @@ def main() -> None:
             run_backend(args.input_path, backend, args.exec_mode, args.output_path)
             return
 
-        summary = validate_backend(args.input_path, backend)
+        summary = validate_backend(args.input_path, backend, args.output_path)
         if summary.discrepant_rows:
             raise SystemExit(1)
 

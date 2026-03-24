@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import csv
+import json
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import rich.progress
 
-from bench.schema import Backend, ReferenceRow
+from bench.schema import Backend, BackendResult, ParsedExitType, ReferenceRow, ValidationReport
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +25,43 @@ class ValidationSummary:
     issue_count: int
 
 
-def validate(input_path: Path, backend: Backend) -> ValidationSummary:
+@dataclass(frozen=True)
+class SerializableReferenceRow:
+    """JSON-friendly snapshot of a typed reference row."""
+
+    insn: str
+    length: int | None
+    exit_type: str
+    raw: dict[str, str]
+    parsed_exit_type: ParsedExitType
+
+    @classmethod
+    def from_reference(cls, reference: ReferenceRow) -> "SerializableReferenceRow":
+        return cls(
+            insn=reference.insn.hex(),
+            length=reference.length,
+            exit_type=reference.exit_type,
+            raw=dict(reference.raw),
+            parsed_exit_type=reference.parsed_exit_type,
+        )
+
+
+@dataclass(frozen=True)
+class ValidationFailure:
+    """JSON-friendly representation of one validation failure."""
+
+    reference: SerializableReferenceRow
+    result: BackendResult
+    report: ValidationReport
+
+
+def validate(input_path: Path, backend: Backend, output_path: Path | None = None) -> ValidationSummary:
     """Read an input CSV, validate it against a backend, and log discrepancies."""
     total_rows = 0
     comparable_rows = 0
     discrepant_rows = 0
     issue_count = 0
+    failures: list[ValidationFailure] = []
 
     with rich.progress.open(input_path, "r", description="Validating") as inf:
         reader = csv.DictReader(inf)
@@ -55,6 +87,11 @@ def validate(input_path: Path, backend: Backend) -> ValidationSummary:
 
             discrepant_rows += 1
             issue_count += len(report.issues)
+            failures.append(ValidationFailure(
+                reference=SerializableReferenceRow.from_reference(reference),
+                result=result,
+                report=report,
+            ))
             for issue in report.issues:
                 logger.error(
                     "insn=%s field=%s expected=%r actual=%r: %s",
@@ -78,4 +115,8 @@ def validate(input_path: Path, backend: Backend) -> ValidationSummary:
         summary.discrepant_rows,
         summary.issue_count,
     )
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w") as outf:
+            json.dump([asdict(failure) for failure in failures], outf, indent=2)
     return summary

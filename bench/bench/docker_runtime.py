@@ -117,6 +117,7 @@ def validate_backend_container(
     backend_name: str,
     input_path: Path,
     exec_mode: int,
+    output_path: Path | None = None,
     *,
     client=None,
 ) -> None:
@@ -126,7 +127,7 @@ def validate_backend_container(
         exec_mode=exec_mode,
         subcommand="validate",
         input_path=input_path,
-        output_path=None,
+        output_path=output_path,
         client=client,
     )
 
@@ -222,8 +223,9 @@ def validate_backend_in_docker(
     input_path: Path,
     backend_name: str,
     exec_mode: int,
+    output_path: Path | None = None,
 ) -> None:
     """Build and run backend validation inside a container."""
     client = docker.from_env()
     build_backend_image(backend_name, client=client)
-    validate_backend_container(backend_name, input_path, exec_mode, client=client)
+    validate_backend_container(backend_name, input_path, exec_mode, output_path=output_path, client=client)

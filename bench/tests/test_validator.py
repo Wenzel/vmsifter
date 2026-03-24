@@ -1,5 +1,6 @@
 """Tests for validation runner behavior."""
 
+import json
 from pathlib import Path
 
 from bench.schema import Backend, BackendResult, ReferenceRow, ValidationIssue, ValidationReport
@@ -67,3 +68,24 @@ def test_validate_reports_discrepancies(tmp_path: Path):
     assert summary.comparable_rows == 1
     assert summary.discrepant_rows == 1
     assert summary.issue_count == 1
+
+
+def test_validate_writes_failures_as_json_array(tmp_path: Path):
+    input_path = tmp_path / "catalog.csv"
+    output_path = tmp_path / "failures.json"
+    input_path.write_text(
+        "\n".join([
+            "insn,length,exit-type,misc,reg-delta",
+            "0f1f00,2,vmexit:37,,",
+        ]) + "\n",
+        encoding="ascii",
+    )
+
+    summary = validate(input_path, FakeBackend(exec_mode=64), output_path=output_path)
+
+    assert summary.discrepant_rows == 1
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert len(payload) == 1
+    assert payload[0]["reference"]["insn"] == "0f1f00"
+    assert payload[0]["report"]["comparable"] is True
+    assert payload[0]["report"]["issues"][0]["field"] == "length"

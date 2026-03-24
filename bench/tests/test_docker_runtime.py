@@ -179,3 +179,33 @@ def test_validate_backend_container_mounts_input_only(tmp_path: Path):
         "remove": False,
     }]
     assert client.containers.last_container.removed == [True]
+
+
+def test_validate_backend_container_with_output_mounts_shared_directory(tmp_path: Path):
+    client = FakeClient()
+    input_path = tmp_path / "catalog.csv"
+    output_path = tmp_path / "failures.json"
+    input_path.write_text("insn\n90\n", encoding="ascii")
+
+    validate_backend_container("xed", input_path, 64, output_path=output_path, client=client)
+
+    assert client.containers.calls == [{
+        "image": "vmsifter-bench/xed:dev",
+        "command": [
+            "validate",
+            "--input",
+            "/work/catalog.csv",
+            "--backend",
+            "xed",
+            "--exec-mode",
+            "64",
+            "--output",
+            "/work/failures.json",
+        ],
+        "volumes": {
+            str(tmp_path.resolve()): {"bind": "/work", "mode": "rw"},
+        },
+        "detach": True,
+        "remove": False,
+    }]
+    assert client.containers.last_container.removed == [True]
