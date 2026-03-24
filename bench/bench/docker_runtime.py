@@ -103,19 +103,64 @@ def run_backend_container(
     client=None,
 ) -> None:
     """Run a built backend container to completion."""
+    _run_backend_container(
+        backend_name,
+        exec_mode=exec_mode,
+        subcommand="run",
+        input_path=input_path,
+        output_path=output_path,
+        client=client,
+    )
+
+
+def validate_backend_container(
+    backend_name: str,
+    input_path: Path,
+    exec_mode: int,
+    *,
+    client=None,
+) -> None:
+    """Run backend validation inside a container."""
+    _run_backend_container(
+        backend_name,
+        exec_mode=exec_mode,
+        subcommand="validate",
+        input_path=input_path,
+        output_path=None,
+        client=client,
+    )
+
+
+def _run_backend_container(
+    backend_name: str,
+    exec_mode: int,
+    subcommand: str,
+    input_path: Path,
+    output_path: Path | None,
+    *,
+    client=None,
+) -> None:
+    """Run a built backend container to completion."""
     client = client or docker.from_env()
     image = image_name_for_backend(backend_name)
     input_path = input_path.resolve()
-    output_path = output_path.resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path is not None:
+        output_path = output_path.resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if input_path.parent == output_path.parent:
+    if output_path is not None and input_path.parent == output_path.parent:
         mount_host = input_path.parent
         volumes = {
             str(mount_host): {"bind": "/work", "mode": "rw"},
         }
         input_arg = Path("/work") / input_path.name
         output_arg = Path("/work") / output_path.name
+    elif output_path is None:
+        volumes = {
+            str(input_path.parent): {"bind": "/input", "mode": "ro"},
+        }
+        input_arg = Path("/input") / input_path.name
+        output_arg = None
     else:
         volumes = {
             str(input_path.parent): {"bind": "/input", "mode": "ro"},
@@ -125,18 +170,23 @@ def run_backend_container(
         output_arg = Path("/output") / output_path.name
 
     logger.info("Running backend container %s", image)
-    container = client.containers.run(
-        image=image,
-        command=[
-            "--input",
-            str(input_arg),
+    command = [
+        subcommand,
+        "--input",
+        str(input_arg),
+        "--backend",
+        backend_name,
+        "--exec-mode",
+        str(exec_mode),
+    ]
+    if output_arg is not None:
+        command.extend([
             "--output",
             str(output_arg),
-            "--backend",
-            backend_name,
-            "--exec-mode",
-            str(exec_mode),
-        ],
+        ])
+    container = client.containers.run(
+        image=image,
+        command=command,
         volumes=volumes,
         detach=True,
         remove=False,
@@ -166,3 +216,14 @@ def run_backend_in_docker(
     client = docker.from_env()
     build_backend_image(backend_name, client=client)
     run_backend_container(backend_name, input_path, exec_mode, output_path, client=client)
+
+
+def validate_backend_in_docker(
+    input_path: Path,
+    backend_name: str,
+    exec_mode: int,
+) -> None:
+    """Build and run backend validation inside a container."""
+    client = docker.from_env()
+    build_backend_image(backend_name, client=client)
+    validate_backend_container(backend_name, input_path, exec_mode, client=client)

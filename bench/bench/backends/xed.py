@@ -5,7 +5,7 @@ import logging
 from _xed_cffi import ffi, lib  # type: ignore[import-not-found]
 
 from bench.backends.base import register
-from bench.schema import Backend, BackendResult
+from bench.schema import Backend, BackendResult, ReferenceRow, ValidationIssue, ValidationReport
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +82,29 @@ class XedBackend(Backend):
             reg_delta=reg_delta,
             misc={"asm": asm} if asm else None,
         )
+
+    def validate(self, reference: ReferenceRow, result: BackendResult) -> ValidationReport:
+        expected_valid = reference.expected_xed_validity()
+        if expected_valid is None:
+            return ValidationReport.skip()
+
+        issues: list[ValidationIssue] = []
+        if result.valid is not expected_valid:
+            issues.append(ValidationIssue(
+                field="valid",
+                expected=expected_valid,
+                actual=result.valid,
+                message="XED validity disagrees with the reference row",
+            ))
+        elif expected_valid and reference.length is not None and result.length != reference.length:
+            issues.append(ValidationIssue(
+                field="length",
+                expected=reference.length,
+                actual=result.length,
+                message="XED decoded length disagrees with the reference row",
+            ))
+
+        return ValidationReport(comparable=True, issues=tuple(issues))
 
     def _written_registers(self) -> str | None:
         """Return space-joined sorted register names written by the decoded instruction."""

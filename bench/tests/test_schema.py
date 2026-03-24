@@ -1,8 +1,8 @@
-"""Tests for BackendResult dataclass."""
+"""Tests for schema dataclasses and parsing helpers."""
 
 import pytest
 
-from bench.schema import BackendResult
+from bench.schema import BackendResult, ReferenceRow, parse_exit_type
 
 
 def test_create_valid_result():
@@ -43,3 +43,48 @@ def test_with_all_fields():
     )
     assert r.reg_delta == "rax=0x1"
     assert r.misc == {"asm": "nop"}
+
+
+def test_parse_exit_type_mtf():
+    parsed = parse_exit_type("vmexit:37")
+
+    assert parsed.kind == "vmexit"
+    assert parsed.vmexit_reason == 37
+    assert parsed.interrupt_type is None
+
+
+def test_parse_exit_type_invalid_opcode():
+    parsed = parse_exit_type("vmexit:0 interrupt_type:hw_exc interrupt_vector:invalid_opcode")
+
+    assert parsed.kind == "vmexit"
+    assert parsed.vmexit_reason == 0
+    assert parsed.interrupt_type == "hw_exc"
+    assert parsed.interrupt_vector == "invalid_opcode"
+
+
+def test_reference_row_parses_and_exposes_xed_comparability():
+    reference = ReferenceRow.from_csv_row({
+        "insn": "90",
+        "length": "1",
+        "exit-type": "vmexit:37",
+        "misc": "",
+        "reg-delta": "",
+    })
+
+    assert reference.insn == b"\x90"
+    assert reference.length == 1
+    assert reference.expected_xed_validity() is True
+    assert reference.is_xed_comparable() is True
+
+
+def test_reference_row_skips_invalid_opcode_for_xed():
+    reference = ReferenceRow.from_csv_row({
+        "insn": "0f0b",
+        "length": "2",
+        "exit-type": "vmexit:0 interrupt_type:hw_exc interrupt_vector:invalid_opcode",
+        "misc": "",
+        "reg-delta": "",
+    })
+
+    assert reference.expected_xed_validity() is None
+    assert reference.is_xed_comparable() is False

@@ -9,6 +9,7 @@ from bench.docker_runtime import (
     image_name_for_backend,
     list_backends,
     run_backend_container,
+    validate_backend_container,
 )
 
 
@@ -134,17 +135,45 @@ def test_run_backend_container_mounts_shared_directory_once(tmp_path: Path):
     assert client.containers.calls == [{
         "image": "vmsifter-bench/xed:dev",
         "command": [
+            "run",
             "--input",
             "/work/catalog.csv",
+            "--backend",
+            "xed",
+            "--exec-mode",
+            "64",
             "--output",
             "/work/results_xed.csv",
+        ],
+        "volumes": {
+            str(tmp_path.resolve()): {"bind": "/work", "mode": "rw"},
+        },
+        "detach": True,
+        "remove": False,
+    }]
+    assert client.containers.last_container.removed == [True]
+
+
+def test_validate_backend_container_mounts_input_only(tmp_path: Path):
+    client = FakeClient()
+    input_path = tmp_path / "catalog.csv"
+    input_path.write_text("insn\n90\n", encoding="ascii")
+
+    validate_backend_container("xed", input_path, 64, client=client)
+
+    assert client.containers.calls == [{
+        "image": "vmsifter-bench/xed:dev",
+        "command": [
+            "validate",
+            "--input",
+            "/input/catalog.csv",
             "--backend",
             "xed",
             "--exec-mode",
             "64",
         ],
         "volumes": {
-            str(tmp_path.resolve()): {"bind": "/work", "mode": "rw"},
+            str(tmp_path.resolve()): {"bind": "/input", "mode": "ro"},
         },
         "detach": True,
         "remove": False,

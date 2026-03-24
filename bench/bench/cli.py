@@ -7,7 +7,7 @@ from pathlib import Path
 import click
 
 from bench.diff import diff as run_diff
-from bench.docker_runtime import list_backends, run_backend_in_docker
+from bench.docker_runtime import list_backends, run_backend_in_docker, validate_backend_in_docker
 
 
 @click.group()
@@ -43,8 +43,26 @@ def run(
         output_file = output_dir / f"results_{backend_name}.csv"
 
     click.echo(f"Backend: {backend_name} | Mode: {mode}-bit | Input: {input_path}")
-    run_backend_in_docker(input_path, backend_name, mode, output_file)
+    try:
+        run_backend_in_docker(input_path, backend_name, mode, output_file)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Output: {output_file}")
+
+
+@main.command()
+@click.option("-i", "--input", "input_path", required=True, type=click.Path(exists=True, path_type=Path))
+@click.option("-b", "--backend", "backend_name", required=True, type=str)
+@click.option("--exec-mode", type=click.Choice(["32", "64"]), default="64", show_default=True)
+def validate(input_path: Path, backend_name: str, exec_mode: str) -> None:
+    """Validate an input CSV against a backend without writing a results file."""
+    mode = int(exec_mode)
+    click.echo(f"Backend: {backend_name} | Mode: {mode}-bit | Input: {input_path}")
+    try:
+        validate_backend_in_docker(input_path, backend_name, mode)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo("Validation succeeded.")
 
 
 @main.command()

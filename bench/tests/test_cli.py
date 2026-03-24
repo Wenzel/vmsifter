@@ -33,3 +33,22 @@ def test_run_command_uses_docker_runtime(tmp_path: Path, monkeypatch):
 
     assert result.exit_code == 0
     assert calls == [(input_path, "xed", 64, Path("results_xed.csv"))]
+
+
+def test_validate_command_uses_docker_runtime(tmp_path: Path, monkeypatch):
+    calls = []
+
+    def fake_validate_backend_in_docker(input_path: Path, backend_name: str, exec_mode: int) -> None:
+        calls.append((input_path, backend_name, exec_mode))
+
+    monkeypatch.setattr(cli, "validate_backend_in_docker", fake_validate_backend_in_docker)
+    input_path = tmp_path / "catalog.csv"
+    input_path.write_text("insn\n90\n", encoding="ascii")
+
+    result = CliRunner().invoke(
+        cli.main,
+        ["validate", "--input", str(input_path), "--backend", "xed", "--exec-mode", "64"],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [(input_path, "xed", 64)]
