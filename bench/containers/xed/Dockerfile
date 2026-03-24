@@ -5,8 +5,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git build-essential && \
     rm -rf /var/lib/apt/lists/*
 
-RUN git clone https://github.com/intelxed/xed.git -b v2024.05.20 /build/xed && \
-    git clone https://github.com/intelxed/mbuild.git -b v2024.05.05 /build/mbuild && \
+RUN git clone https://github.com/intelxed/xed.git -b v2026.03.18 /build/xed && \
+    git clone https://github.com/intelxed/mbuild.git -b v2026.03.18 /build/mbuild && \
     cd /build/xed && \
     ./mfile.py install && \
     mv kits/* /root/xedkit
@@ -39,4 +39,4 @@ COPY --from=cffi-builder /usr/local/bin/vmsifter-bench /usr/local/bin/vmsifter-b
 
 ENV LD_LIBRARY_PATH=/root/xedkit/lib
 
-ENTRYPOINT ["vmsifter-bench", "run"]
+ENTRYPOINT ["python", "-m", "bench.container_entrypoint"]

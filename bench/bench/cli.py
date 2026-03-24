@@ -6,9 +6,8 @@ from pathlib import Path
 
 import click
 
-from bench.backends import get_backend, list_backends
 from bench.diff import diff as run_diff
-from bench.runner import run as run_backend
+from bench.docker_runtime import list_backends, run_backend_in_docker
 
 
 @click.group()
@@ -37,15 +36,14 @@ def run(
     output_dir: Path,
     output_file: Path | None,
 ) -> None:
-    """Run a backend on an instruction catalog CSV."""
+    """Build and run a backend container on an instruction catalog CSV."""
     mode = int(exec_mode)
 
     if output_file is None:
         output_file = output_dir / f"results_{backend_name}.csv"
 
     click.echo(f"Backend: {backend_name} | Mode: {mode}-bit | Input: {input_path}")
-    with get_backend(backend_name, exec_mode=mode) as backend:
-        run_backend(input_path, backend, mode, output_file)
+    run_backend_in_docker(input_path, backend_name, mode, output_file)
     click.echo(f"Output: {output_file}")
 
 
@@ -65,11 +63,10 @@ def diff(left: Path, right: Path, columns: str, output_path: Path | None) -> Non
 
 @main.command("backends")
 def backends_cmd() -> None:
-    """List registered backends."""
+    """List available containerized backends."""
     names = list_backends()
     if not names:
         click.echo("No backends available.")
         return
     for name in names:
-        backend = get_backend(name, exec_mode=64)
-        click.echo(f"  {name} ({backend.kind})")
+        click.echo(f"  {name}")

@@ -7,4 +7,4 @@ COPY bench/ bench/
 
 RUN pip install --no-cache-dir . capstone>=5.0
 
-ENTRYPOINT ["vmsifter-bench", "run"]
+ENTRYPOINT ["python", "-m", "bench.container_entrypoint"]

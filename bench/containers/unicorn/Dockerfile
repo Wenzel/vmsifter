@@ -7,4 +7,4 @@ COPY bench/ bench/
 
 RUN pip install --no-cache-dir . unicorn>=2.0
 
-ENTRYPOINT ["vmsifter-bench", "run"]
+ENTRYPOINT ["python", "-m", "bench.container_entrypoint"]
