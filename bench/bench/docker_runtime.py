@@ -28,6 +28,7 @@ from rich.progress import (
 )
 
 from bench.progress import decode_progress_line
+from bench.validator import VALIDATION_DISCREPANCY_EXIT_CODE
 
 logger = logging.getLogger(__name__)
 
@@ -575,9 +576,11 @@ def validate_backend_containers_parallel(
                     if status_code == 0:
                         self.part_path.write_text("[]", encoding="utf-8")
                         return
-                    raise RuntimeError(
-                        f"Validation worker reported discrepancies but did not write {self.part_path}"
-                    )
+                    if status_code == VALIDATION_DISCREPANCY_EXIT_CODE:
+                        raise RuntimeError(
+                            f"Validation worker reported discrepancies but did not write {self.part_path}"
+                        )
+                    return
 
             return [_CollectingFuture(future, part_path) for future, part_path in submitted]
 
@@ -589,7 +592,7 @@ def validate_backend_containers_parallel(
         if output_path is not None:
             _merge_json_arrays(part_paths, output_path)
 
-        if any(status_code == 1 for status_code in results):
+        if any(status_code == VALIDATION_DISCREPANCY_EXIT_CODE for status_code in results):
             raise RuntimeError("Validation found discrepancies")
 
 
@@ -843,11 +846,15 @@ def _run_backend_container(
                 progress_lock=progress_lock,
                 log_label=worker_label,
             )
-            if subcommand == "validate" and status_code == 1 and allow_discrepancies:
+            if (
+                subcommand == "validate"
+                and status_code == VALIDATION_DISCREPANCY_EXIT_CODE
+                and allow_discrepancies
+            ):
                 return status_code
             if status_code != 0:
                 label = backend_name if worker_label is None else worker_label
-                if subcommand == "validate" and status_code == 1:
+                if subcommand == "validate" and status_code == VALIDATION_DISCREPANCY_EXIT_CODE:
                     raise RuntimeError("Validation found discrepancies")
                 raise RuntimeError(f"Backend {label!r} exited with code {status_code}")
             return status_code

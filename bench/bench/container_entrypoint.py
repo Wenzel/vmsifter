@@ -5,7 +5,7 @@ from pathlib import Path
 
 from bench.backends import get_backend
 from bench.runner import run as run_backend
-from bench.validator import validate as validate_backend
+from bench.validator import VALIDATION_DISCREPANCY_EXIT_CODE, validate as validate_backend
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,7 +56,7 @@ def main() -> None:
             byte_end=args.byte_end,
         )
         if summary.discrepant_rows:
-            raise SystemExit(1)
+            raise SystemExit(VALIDATION_DISCREPANCY_EXIT_CODE)
 
 
 if __name__ == "__main__":

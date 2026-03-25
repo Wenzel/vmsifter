@@ -1,5 +1,6 @@
 """Tests for Docker runtime helpers."""
 
+import json
 import logging
 from pathlib import Path
 
@@ -22,6 +23,8 @@ from bench.docker_runtime import (
     validate_backend_containers_parallel,
     validate_backend_in_docker,
 )
+from bench.schema import Backend, BackendResult, ReferenceRow, ValidationIssue, ValidationReport
+from bench.validator import VALIDATION_DISCREPANCY_EXIT_CODE, validate
 
 
 class FakeImages:
@@ -128,6 +131,30 @@ class FakeExecutor:
 
     def shutdown(self, wait: bool, cancel_futures: bool = False) -> None:
         self.shutdown_calls.append((wait, cancel_futures))
+
+
+class RealValidationBackend(Backend):
+    name = "fake"
+    kind = "decoder"
+
+    def __init__(self, exec_mode: int) -> None:
+        self.exec_mode = exec_mode
+
+    def process(self, insn_bytes: bytes) -> BackendResult:
+        return BackendResult(valid=True, length=len(insn_bytes), exit_type="valid")
+
+    def validate(self, reference: ReferenceRow, result: BackendResult) -> ValidationReport:
+        if reference.length == 99:
+            return ValidationReport(
+                comparable=True,
+                issues=(ValidationIssue(
+                    field="length",
+                    expected=reference.length,
+                    actual=result.length,
+                    message="length mismatch",
+                ),),
+            )
+        return ValidationReport(comparable=True)
 
 
 def test_list_backends_discovers_container_directories(tmp_path: Path):
@@ -605,7 +632,7 @@ def test_validate_backend_containers_parallel_merges_json_outputs(tmp_path: Path
         calls.append((backend_name, input_file, exec_mode, byte_start, byte_end, worker_label, allow_discrepancies))
         assert output_path is not None
         output_path.write_text(f'[{{"start": {byte_start}, "end": {byte_end}}}]', encoding="utf-8")
-        return 1 if byte_start == 5 else 0
+        return docker_runtime_module.VALIDATION_DISCREPANCY_EXIT_CODE if byte_start == 5 else 0
 
     monkeypatch.setattr(docker_runtime_module, "validate_backend_container", fake_validate_backend_container)
     monkeypatch.setattr(docker_runtime_module, "_should_render_progress", lambda: False)
@@ -647,7 +674,7 @@ def test_validate_backend_containers_parallel_treats_missing_clean_outputs_as_em
         assert output_path is not None
         if byte_start == 5:
             output_path.write_text(f'[{{"start": {byte_start}, "end": {byte_end}}}]', encoding="utf-8")
-            return 1
+            return docker_runtime_module.VALIDATION_DISCREPANCY_EXIT_CODE
         return 0
 
     monkeypatch.setattr(docker_runtime_module, "validate_backend_container", fake_validate_backend_container)
@@ -661,6 +688,66 @@ def test_validate_backend_containers_parallel_treats_missing_clean_outputs_as_em
         raise AssertionError("Expected validation discrepancies to raise")
 
     assert output_path.read_text(encoding="utf-8") == '[\n  {\n    "start": 5,\n    "end": 8\n  }\n]'
+
+
+def test_validate_backend_containers_parallel_uses_real_sharding_and_validation(tmp_path: Path, monkeypatch):
+    input_path = tmp_path / "catalog.csv"
+    output_path = tmp_path / "failures.json"
+    input_path.write_text(
+        "\n".join([
+            "insn,length,exit-type,misc,reg-delta",
+            "90,1,vmexit:37,,",
+            "0f1f00,99,vmexit:37,,",
+            "cc,1,vmexit:37,,",
+        ]) + "\n",
+        encoding="ascii",
+    )
+
+    calls: list[tuple[int | None, int | None]] = []
+
+    def real_validate_backend_container(
+        backend_name: str,
+        input_file: Path,
+        exec_mode: int,
+        output_path: Path | None = None,
+        *,
+        client=None,
+        progress_channel_factory=DockerProgressChannel,
+        byte_start: int | None = None,
+        byte_end: int | None = None,
+        progress=None,
+        task_id=None,
+        progress_lock=None,
+        worker_label: str | None = None,
+        allow_discrepancies: bool = False,
+        container_registry=None,
+    ) -> int:
+        calls.append((byte_start, byte_end))
+        summary = validate(
+            input_file,
+            RealValidationBackend(exec_mode=exec_mode),
+            output_path=output_path,
+            byte_start=byte_start,
+            byte_end=byte_end,
+        )
+        return VALIDATION_DISCREPANCY_EXIT_CODE if summary.discrepant_rows else 0
+
+    monkeypatch.setattr(docker_runtime_module, "validate_backend_container", real_validate_backend_container)
+    monkeypatch.setattr(docker_runtime_module, "_should_render_progress", lambda: False)
+
+    try:
+        validate_backend_containers_parallel("xed", input_path, 64, output_path=output_path, workers=2, client=object())
+    except RuntimeError as exc:
+        assert str(exc) == "Validation found discrepancies"
+    else:  # pragma: no cover - defensive
+        raise AssertionError("Expected validation discrepancies to raise")
+
+    assert len(calls) == 2
+    assert len({call for call in calls}) == 2
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert [entry["reference"]["insn"] for entry in payload] == ["0f1f00"]
+    assert payload[0]["report"]["issues"][0]["field"] == "length"
 
 
 def test_validate_backend_in_docker_uses_parallel_path_when_workers_gt_one(tmp_path: Path, monkeypatch):

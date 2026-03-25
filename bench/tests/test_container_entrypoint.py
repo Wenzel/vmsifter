@@ -81,3 +81,35 @@ def test_main_passes_progress_socket_to_validator(monkeypatch):
         (Path("/input/catalog.csv"), backend, Path("/output/failures.json")),
         {"progress_socket": progress_socket, "byte_start": 123, "byte_end": 456},
     )]
+
+
+def test_main_uses_dedicated_exit_code_for_validation_discrepancies(monkeypatch):
+    backend = object()
+
+    monkeypatch.setattr(
+        container_entrypoint,
+        "parse_args",
+        lambda: Namespace(
+            command="validate",
+            input_path=Path("/input/catalog.csv"),
+            output_path=Path("/output/failures.json"),
+            backend_name="xed",
+            exec_mode=64,
+            progress_socket=None,
+            byte_start=None,
+            byte_end=None,
+        ),
+    )
+    monkeypatch.setattr(container_entrypoint, "get_backend", lambda *args, **kwargs: FakeBackendContext(backend))
+    monkeypatch.setattr(
+        container_entrypoint,
+        "validate_backend",
+        lambda *args, **kwargs: Namespace(discrepant_rows=1),
+    )
+
+    try:
+        container_entrypoint.main()
+    except SystemExit as exc:
+        assert exc.code == container_entrypoint.VALIDATION_DISCREPANCY_EXIT_CODE
+    else:  # pragma: no cover - defensive
+        raise AssertionError("Expected validation discrepancies to exit")

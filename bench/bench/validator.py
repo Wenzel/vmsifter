@@ -23,6 +23,8 @@ from bench.schema import (
 
 logger = logging.getLogger(__name__)
 
+VALIDATION_DISCREPANCY_EXIT_CODE = 2
+
 
 @dataclass(frozen=True)
 class ValidationSummary:
