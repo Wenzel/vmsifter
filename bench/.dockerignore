@@ -1,7 +1,5 @@
-.git
-.pytest_cache
-.mypy_cache
-.venv
-__pycache__
-*.pyc
-tests
+*
+!pyproject.toml
+!xed_build.py
+!bench/
+!containers/
