@@ -622,6 +622,47 @@ def test_validate_backend_containers_parallel_merges_json_outputs(tmp_path: Path
     assert output_path.read_text(encoding="utf-8") == '[\n  {\n    "start": 5,\n    "end": 8\n  },\n  {\n    "start": 8,\n    "end": 11\n  }\n]'
 
 
+def test_validate_backend_containers_parallel_treats_missing_clean_outputs_as_empty_arrays(tmp_path: Path, monkeypatch):
+    input_path = tmp_path / "catalog.csv"
+    output_path = tmp_path / "failures.json"
+    input_path.write_text("insn\n90\ncc\n", encoding="ascii")
+
+    def fake_validate_backend_container(
+        backend_name: str,
+        input_file: Path,
+        exec_mode: int,
+        output_path: Path | None = None,
+        *,
+        client=None,
+        progress_channel_factory=DockerProgressChannel,
+        byte_start: int | None = None,
+        byte_end: int | None = None,
+        progress=None,
+        task_id=None,
+        progress_lock=None,
+        worker_label: str | None = None,
+        allow_discrepancies: bool = False,
+        container_registry=None,
+    ) -> int:
+        assert output_path is not None
+        if byte_start == 5:
+            output_path.write_text(f'[{{"start": {byte_start}, "end": {byte_end}}}]', encoding="utf-8")
+            return 1
+        return 0
+
+    monkeypatch.setattr(docker_runtime_module, "validate_backend_container", fake_validate_backend_container)
+    monkeypatch.setattr(docker_runtime_module, "_should_render_progress", lambda: False)
+
+    try:
+        validate_backend_containers_parallel("xed", input_path, 64, output_path=output_path, workers=2, client=object())
+    except RuntimeError as exc:
+        assert str(exc) == "Validation found discrepancies"
+    else:  # pragma: no cover - defensive
+        raise AssertionError("Expected validation discrepancies to raise")
+
+    assert output_path.read_text(encoding="utf-8") == '[\n  {\n    "start": 5,\n    "end": 8\n  }\n]'
+
+
 def test_validate_backend_in_docker_uses_parallel_path_when_workers_gt_one(tmp_path: Path, monkeypatch):
     input_path = tmp_path / "catalog.csv"
     output_path = tmp_path / "failures.json"

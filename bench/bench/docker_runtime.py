@@ -560,16 +560,26 @@ def validate_backend_containers_parallel(
         results: list[int] = []
 
         def submit_and_collect(executor: ThreadPoolExecutor):
-            futures = submit_workers(executor)
+            submitted = list(zip(submit_workers(executor), part_paths))
 
             class _CollectingFuture:
-                def __init__(self, future) -> None:
+                def __init__(self, future, part_path: Path) -> None:
                     self.future = future
+                    self.part_path = part_path
 
                 def result(self):
-                    results.append(self.future.result())
+                    status_code = self.future.result()
+                    results.append(status_code)
+                    if output_path is None or self.part_path.exists():
+                        return
+                    if status_code == 0:
+                        self.part_path.write_text("[]", encoding="utf-8")
+                        return
+                    raise RuntimeError(
+                        f"Validation worker reported discrepancies but did not write {self.part_path}"
+                    )
 
-            return [_CollectingFuture(future) for future in futures]
+            return [_CollectingFuture(future, part_path) for future, part_path in submitted]
 
         _run_parallel_futures(
             submit_and_collect,
