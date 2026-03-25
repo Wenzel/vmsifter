@@ -5,11 +5,13 @@ from __future__ import annotations
 import csv
 import json
 import logging
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import rich.progress
 
+from bench.progress import ByteCountingTextReader, ProgressReporter
 from bench.schema import Backend, BackendResult, ParsedExitType, ReferenceRow, ValidationReport
 
 logger = logging.getLogger(__name__)
@@ -55,21 +57,32 @@ class ValidationFailure:
     report: ValidationReport
 
 
-def validate(input_path: Path, backend: Backend, output_path: Path | None = None) -> ValidationSummary:
+def validate(
+    input_path: Path,
+    backend: Backend,
+    output_path: Path | None = None,
+    progress_socket: Path | None = None,
+) -> ValidationSummary:
     """Read an input CSV, validate it against a backend, and log discrepancies."""
+    total_bytes = input_path.stat().st_size
     total_rows = 0
     comparable_rows = 0
     discrepant_rows = 0
     issue_count = 0
     failures: list[ValidationFailure] = []
 
-    with rich.progress.open(input_path, "r", description="Validating") as inf:
+    with (
+        _open_input(input_path, description="Validating", progress_socket=progress_socket) as inf,
+        ProgressReporter(progress_socket, phase="validate", every=64 * 1024) as reporter,
+    ):
         reader = csv.DictReader(inf)
         if "insn" not in (reader.fieldnames or []):
             logger.error("Input CSV missing 'insn' column")
             raise SystemExit(1)
 
         for row in reader:
+            if progress_socket is not None:
+                reporter.report(inf.bytes_read)
             insn_hex = row["insn"].strip()
             if not insn_hex:
                 continue
@@ -102,6 +115,9 @@ def validate(input_path: Path, backend: Backend, output_path: Path | None = None
                     issue.message,
                 )
 
+        if progress_socket is not None:
+            reporter.report(total_bytes, force=True, done=True)
+
     summary = ValidationSummary(
         total_rows=total_rows,
         comparable_rows=comparable_rows,
@@ -120,3 +136,15 @@ def validate(input_path: Path, backend: Backend, output_path: Path | None = None
         with open(output_path, "w") as outf:
             json.dump([asdict(failure) for failure in failures], outf, indent=2)
     return summary
+
+
+@contextmanager
+def _open_input(input_path: Path, *, description: str, progress_socket: Path | None):
+    """Open an input CSV, keeping Rich progress for direct interactive runs only."""
+    if progress_socket is not None:
+        with ByteCountingTextReader(input_path) as inf:
+            yield inf
+        return
+
+    with rich.progress.open(input_path, "r", description=description) as inf:
+        yield inf

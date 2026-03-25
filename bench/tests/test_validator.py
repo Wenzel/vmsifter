@@ -1,6 +1,8 @@
 """Tests for validation runner behavior."""
 
 import json
+import socket
+import threading
 from pathlib import Path
 
 from bench.schema import Backend, BackendResult, ReferenceRow, ValidationIssue, ValidationReport
@@ -89,3 +91,39 @@ def test_validate_writes_failures_as_json_array(tmp_path: Path):
     assert payload[0]["reference"]["insn"] == "0f1f00"
     assert payload[0]["report"]["comparable"] is True
     assert payload[0]["report"]["issues"][0]["field"] == "length"
+
+
+def test_validate_reports_byte_progress_over_unix_socket(tmp_path: Path):
+    input_path = tmp_path / "catalog.csv"
+    socket_path = tmp_path / "progress.sock"
+    input_path.write_text(
+        "\n".join([
+            "insn,length,exit-type,misc,reg-delta",
+            "90,1,vmexit:37,,",
+            "0f0b,2,vmexit:0 interrupt_type:hw_exc interrupt_vector:invalid_opcode,,",
+        ]) + "\n",
+        encoding="ascii",
+    )
+    messages: list[dict[str, object]] = []
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(socket_path))
+    server.listen(1)
+
+    def read_messages() -> None:
+        conn, _ = server.accept()
+        with conn, conn.makefile("r", encoding="utf-8") as stream:
+            for line in stream:
+                messages.append(json.loads(line))
+
+    reader = threading.Thread(target=read_messages, daemon=True)
+    reader.start()
+
+    validate(input_path, FakeBackend(exec_mode=64), progress_socket=socket_path)
+
+    reader.join(timeout=1)
+    server.close()
+
+    assert messages[0]["current"] == 0
+    assert messages[-1]["current"] == input_path.stat().st_size
+    assert messages[-1]["done"] is True
