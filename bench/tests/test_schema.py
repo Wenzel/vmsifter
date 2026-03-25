@@ -2,7 +2,7 @@
 
 import pytest
 
-from bench.schema import BackendResult, ReferenceRow, parse_exit_type
+from bench.schema import BackendResult, InvalidInstructionHexError, ReferenceRow, parse_exit_type
 
 
 def test_create_valid_result():
@@ -88,3 +88,17 @@ def test_reference_row_skips_invalid_opcode_for_xed():
 
     assert reference.expected_xed_validity() is None
     assert reference.is_xed_comparable() is False
+
+
+def test_reference_row_reports_invalid_insn_hex():
+    with pytest.raises(InvalidInstructionHexError) as exc_info:
+        ReferenceRow.from_csv_row({
+            "insn": "zz",
+            "length": "1",
+            "exit-type": "vmexit:37",
+            "misc": "",
+            "reg-delta": "",
+        })
+
+    assert exc_info.value.insn_hex == "zz"
+    assert dict(exc_info.value.raw_row)["insn"] == "zz"

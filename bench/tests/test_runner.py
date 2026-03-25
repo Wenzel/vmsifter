@@ -8,6 +8,8 @@ import socket
 import threading
 from pathlib import Path
 
+import pytest
+
 from bench import runner as runner_module
 from bench.schema import Backend, BackendResult
 
@@ -91,3 +93,15 @@ def test_runner_processes_only_the_assigned_byte_range(tmp_path: Path):
 
     assert [row["insn"] for row in rows] == ["0f0b"]
     assert first_start < second_start < third_start
+
+
+def test_runner_logs_invalid_insn_hex_with_row_context(tmp_path: Path, caplog):
+    input_path = tmp_path / "catalog.csv"
+    output_path = tmp_path / "results.csv"
+    input_path.write_text("insn\nzz\n", encoding="ascii")
+
+    with pytest.raises(SystemExit):
+        runner_module.run(input_path, FakeBackend(exec_mode=64), 64, output_path)
+
+    assert "CSV row 2" in caplog.text
+    assert "insn='zz'" in caplog.text

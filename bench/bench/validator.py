@@ -12,7 +12,14 @@ from pathlib import Path
 import rich.progress
 
 from bench.progress import ByteCountingTextReader, ByteRangeTextReader, ProgressReporter
-from bench.schema import Backend, BackendResult, ParsedExitType, ReferenceRow, ValidationReport
+from bench.schema import (
+    Backend,
+    BackendResult,
+    InvalidInstructionHexError,
+    ParsedExitType,
+    ReferenceRow,
+    ValidationReport,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +100,7 @@ def validate(
     ):
         reader = csv.DictReader(inf, fieldnames=fieldnames if use_byte_range else None)
 
-        for row in reader:
+        for row_number, row in enumerate(reader, start=2):
             if progress_socket is not None:
                 reporter.report(inf.bytes_read)
             insn_hex = row["insn"].strip()
@@ -101,7 +108,16 @@ def validate(
                 continue
 
             total_rows += 1
-            reference = ReferenceRow.from_csv_row(row)
+            try:
+                reference = ReferenceRow.from_csv_row(row)
+            except InvalidInstructionHexError as exc:
+                _log_invalid_input_row(
+                    row_number,
+                    exc,
+                    byte_start=range_start if use_byte_range else None,
+                    byte_end=range_end if use_byte_range else None,
+                )
+                raise SystemExit(1) from exc
             result = backend.process(reference.insn)
             report = backend.validate(reference, result)
             if not report.comparable:
@@ -165,6 +181,33 @@ def _read_input_header(input_path: Path) -> tuple[list[str], int]:
         logger.error("Input CSV header is empty")
         raise SystemExit(1)
     return fieldnames, data_start
+
+
+def _log_invalid_input_row(
+    row_number: int,
+    exc: InvalidInstructionHexError,
+    *,
+    byte_start: int | None,
+    byte_end: int | None,
+) -> None:
+    """Emit a high-signal error for malformed instruction hex values."""
+    if byte_start is None or byte_end is None:
+        logger.error(
+            "Invalid instruction hex at CSV row %d: insn=%r row=%r",
+            row_number,
+            exc.insn_hex,
+            dict(exc.raw_row),
+        )
+        return
+
+    logger.error(
+        "Invalid instruction hex at CSV row %d within byte range [%d, %d): insn=%r row=%r",
+        row_number,
+        byte_start,
+        byte_end,
+        exc.insn_hex,
+        dict(exc.raw_row),
+    )
 
 
 @contextmanager

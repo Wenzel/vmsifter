@@ -5,6 +5,8 @@ import socket
 import threading
 from pathlib import Path
 
+import pytest
+
 from bench.schema import Backend, BackendResult, ReferenceRow, ValidationIssue, ValidationReport
 from bench.validator import validate
 
@@ -157,3 +159,20 @@ def test_validate_processes_only_the_assigned_byte_range(tmp_path: Path):
     assert summary.discrepant_rows == 1
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert [entry["reference"]["insn"] for entry in payload] == ["0f1f00"]
+
+
+def test_validate_logs_invalid_insn_hex_with_row_context(tmp_path: Path, caplog):
+    input_path = tmp_path / "catalog.csv"
+    input_path.write_text(
+        "\n".join([
+            "insn,length,exit-type,misc,reg-delta",
+            "zz,1,vmexit:37,,",
+        ]) + "\n",
+        encoding="ascii",
+    )
+
+    with pytest.raises(SystemExit):
+        validate(input_path, FakeBackend(exec_mode=64))
+
+    assert "CSV row 2" in caplog.text
+    assert "insn='zz'" in caplog.text

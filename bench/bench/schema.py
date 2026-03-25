@@ -30,6 +30,17 @@ class ParsedExitType:
     raw: str = ""
 
 
+@dataclass(frozen=True)
+class InvalidInstructionHexError(ValueError):
+    """Raised when a CSV row contains a non-hexadecimal ``insn`` value."""
+
+    insn_hex: str
+    raw_row: Mapping[str, str]
+
+    def __str__(self) -> str:
+        return f"invalid instruction hex {self.insn_hex!r}"
+
+
 def parse_exit_type(value: str) -> ParsedExitType:
     """Parse a VMSifter CSV exit-type string into a structured representation."""
     value = value.strip()
@@ -75,6 +86,15 @@ def _parse_optional_int(value: str | None) -> int | None:
     return int(value, 10)
 
 
+def parse_instruction_hex(row: Mapping[str, str]) -> bytes:
+    """Parse the ``insn`` column and raise a structured error when malformed."""
+    insn_hex = row.get("insn", "").strip()
+    try:
+        return bytes.fromhex(insn_hex)
+    except ValueError as exc:
+        raise InvalidInstructionHexError(insn_hex=insn_hex, raw_row=dict(row)) from exc
+
+
 @dataclass(frozen=True)
 class ReferenceRow:
     """Typed representation of an input CSV row."""
@@ -89,7 +109,7 @@ class ReferenceRow:
     def from_csv_row(cls, row: Mapping[str, str]) -> "ReferenceRow":
         exit_type = row.get("exit-type", "").strip()
         return cls(
-            insn=bytes.fromhex(row["insn"].strip()),
+            insn=parse_instruction_hex(row),
             length=_parse_optional_int(row.get("length")),
             exit_type=exit_type,
             raw=dict(row),
