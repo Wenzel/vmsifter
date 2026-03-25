@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 import queue
@@ -10,10 +11,11 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import docker
-from docker.errors import BuildError
+from docker.errors import BuildError, NotFound
 from rich.progress import (
     BarColumn,
     Progress,
@@ -143,11 +145,21 @@ class DockerProgressChannel:
                             logger.debug("Ignoring malformed progress payload %r", line, exc_info=True)
                 return
 
-    def track_container(self, container, backend_name: str) -> int:
+    def track_container(
+        self,
+        container,
+        backend_name: str,
+        *,
+        progress: Progress | None = None,
+        task_id: TaskID | None = None,
+        progress_lock: threading.Lock | None = None,
+        log_label: str | None = None,
+    ) -> int:
         """Stream logs, render host-side Rich progress, and return the exit code."""
         wait_result: dict[str, int] = {}
         wait_errors: list[BaseException] = []
         log_errors: list[BaseException] = []
+        label = backend_name if log_label is None else log_label
 
         def wait_for_container() -> None:
             try:
@@ -160,7 +172,7 @@ class DockerProgressChannel:
                 for chunk in container.logs(stream=True, follow=True):
                     line = chunk.decode(errors="replace").rstrip()
                     if line:
-                        logger.info("[%s] %s", backend_name, line)
+                        logger.info("[%s] %s", label, line)
             except BaseException as exc:  # pragma: no cover - defensive
                 log_errors.append(exc)
 
@@ -169,7 +181,9 @@ class DockerProgressChannel:
         wait_thread.start()
         log_thread.start()
 
-        if _should_render_progress():
+        if progress is not None and task_id is not None:
+            self._render_into_existing_task(wait_thread, progress, task_id, progress_lock)
+        elif _should_render_progress():
             self._render_progress(wait_thread, backend_name)
 
         wait_thread.join()
@@ -183,16 +197,7 @@ class DockerProgressChannel:
 
     def _render_progress(self, wait_thread: threading.Thread, backend_name: str) -> None:
         completed = 0
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("{task.description}"),
-            BarColumn(),
-            CompactByteCountColumn(),
-            TimeElapsedColumn(),
-            TextColumn("eta"),
-            TimeRemainingColumn(compact=True, elapsed_when_finished=True),
-            transient=True,
-        ) as progress:
+        with _create_progress(transient=True) as progress:
             task_id = progress.add_task(
                 f"{backend_name} {self.subcommand}",
                 total=self.total_bytes,
@@ -202,7 +207,27 @@ class DockerProgressChannel:
                 time.sleep(0.05)
             self._drain_updates(progress, task_id, completed)
 
-    def _drain_updates(self, progress: Progress, task_id: TaskID, completed: int) -> int:
+    def _render_into_existing_task(
+        self,
+        wait_thread: threading.Thread,
+        progress: Progress,
+        task_id: TaskID,
+        progress_lock: threading.Lock | None,
+    ) -> None:
+        completed = 0
+        while wait_thread.is_alive():
+            completed = self._drain_updates(progress, task_id, completed, progress_lock=progress_lock)
+            time.sleep(0.05)
+        self._drain_updates(progress, task_id, completed, progress_lock=progress_lock)
+
+    def _drain_updates(
+        self,
+        progress: Progress,
+        task_id: TaskID,
+        completed: int,
+        *,
+        progress_lock: threading.Lock | None = None,
+    ) -> int:
         latest = completed
         while True:
             try:
@@ -214,7 +239,348 @@ class DockerProgressChannel:
             if isinstance(current, bool) or not isinstance(current, int):
                 continue
             latest = current
-            progress.update(task_id, completed=latest)
+            if progress_lock is None:
+                progress.update(task_id, completed=latest)
+            else:
+                with progress_lock:
+                    progress.update(task_id, completed=latest)
+
+
+class ContainerCleanupRegistry:
+    """Track started containers and force-remove leftovers on scope exit."""
+
+    def __init__(self) -> None:
+        self._containers: list[object] = []
+        self._lock = threading.Lock()
+
+    def __enter__(self) -> "ContainerCleanupRegistry":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.cleanup()
+
+    def track(self, container) -> None:
+        with self._lock:
+            self._containers.append(container)
+
+    def forget(self, container) -> None:
+        with self._lock:
+            try:
+                self._containers.remove(container)
+            except ValueError:
+                pass
+
+    def cleanup(self) -> None:
+        with self._lock:
+            pending = list(self._containers)
+            self._containers.clear()
+
+        for container in pending:
+            _force_remove_container(container)
+
+
+def _create_progress(*, transient: bool) -> Progress:
+    """Build the standard Rich progress renderer used for container execution."""
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("{task.description}"),
+        BarColumn(),
+        CompactByteCountColumn(),
+        TimeElapsedColumn(),
+        TextColumn("eta"),
+        TimeRemainingColumn(compact=True, elapsed_when_finished=True),
+        transient=transient,
+    )
+
+
+def _csv_data_offset(input_path: Path) -> int:
+    """Return the byte offset of the first data row after the CSV header."""
+    with open(input_path, "rb") as stream:
+        stream.readline()
+        return stream.tell()
+
+
+def _align_to_row_start(stream, offset: int, data_start: int, file_size: int) -> int:
+    """Advance an offset to the next CSV row boundary without scanning the file."""
+    if offset <= data_start:
+        return data_start
+    if offset >= file_size:
+        return file_size
+
+    stream.seek(offset - 1)
+    if stream.read(1) == b"\n":
+        return offset
+
+    stream.seek(offset)
+    stream.readline()
+    return min(stream.tell(), file_size)
+
+
+def plan_worker_ranges(input_path: Path, workers: int) -> list[tuple[int, int]]:
+    """Split the CSV body into byte ranges aligned on row boundaries."""
+    if workers < 1:
+        raise ValueError("workers must be >= 1")
+
+    file_size = input_path.stat().st_size
+    data_start = _csv_data_offset(input_path)
+    if data_start >= file_size:
+        return [(data_start, data_start)]
+
+    boundaries = [data_start]
+    with open(input_path, "rb") as stream:
+        span = file_size - data_start
+        for worker_index in range(1, workers):
+            raw_offset = data_start + (span * worker_index) // workers
+            boundaries.append(_align_to_row_start(stream, raw_offset, data_start, file_size))
+    boundaries.append(file_size)
+
+    ranges: list[tuple[int, int]] = []
+    for start, end in zip(boundaries, boundaries[1:]):
+        if start < end:
+            ranges.append((start, end))
+
+    return ranges or [(data_start, data_start)]
+
+
+def _part_output_path(tmpdir: Path, output_path: Path, worker_index: int) -> Path:
+    """Return a stable per-worker output filename."""
+    return tmpdir / f"{output_path.stem}.part{worker_index:03d}{output_path.suffix}"
+
+
+def _merge_csv_parts(part_paths: list[Path], output_path: Path) -> None:
+    """Merge per-worker CSV outputs into a single output file."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    wrote_header = False
+    with open(output_path, "w", newline="") as merged:
+        for part_path in part_paths:
+            with open(part_path, "r", newline="") as part:
+                for line_number, line in enumerate(part):
+                    if line_number == 0:
+                        if wrote_header:
+                            continue
+                        wrote_header = True
+                    merged.write(line)
+
+
+def _merge_json_arrays(part_paths: list[Path], output_path: Path) -> None:
+    """Merge per-worker JSON array outputs into one JSON array."""
+    merged: list[object] = []
+    for part_path in part_paths:
+        with open(part_path, "r", encoding="utf-8") as part:
+            payload = json.load(part)
+        if not isinstance(payload, list):
+            raise ValueError(f"Validation output {part_path} did not contain a JSON array")
+        merged.extend(payload)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as merged_file:
+        json.dump(merged, merged_file, indent=2)
+
+
+def _force_remove_container(container) -> None:
+    """Best-effort forced removal used during interrupt/error cleanup."""
+    try:
+        container.remove(force=True)
+    except NotFound:
+        return
+    except BaseException:  # pragma: no cover - defensive cleanup
+        logger.warning("Failed to remove container during cleanup", exc_info=True)
+
+
+def _tracked_container(container, *, registry: ContainerCleanupRegistry | None):
+    """Context-manage a started container and unregister it after forced cleanup."""
+    return _TrackedContainer(container, registry=registry)
+
+
+class _TrackedContainer:
+    """Internal context manager for a started Docker container."""
+
+    def __init__(self, container, *, registry: ContainerCleanupRegistry | None) -> None:
+        self.container = container
+        self.registry = registry
+
+    def __enter__(self):
+        if self.registry is not None:
+            self.registry.track(self.container)
+        return self.container
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self.registry is not None:
+            self.registry.forget(self.container)
+        _force_remove_container(self.container)
+
+
+def _run_parallel_futures(
+    submit_worker,
+    *,
+    worker_count: int,
+) -> None:
+    """Run submitted worker futures and cleanup started containers on interruption."""
+    executor = ThreadPoolExecutor(max_workers=worker_count)
+    futures = []
+    try:
+        futures = submit_worker(executor)
+        for future in futures:
+            future.result()
+    except BaseException:
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
+
+
+def run_backend_containers_parallel(
+    backend_name: str,
+    input_path: Path,
+    exec_mode: int,
+    output_path: Path,
+    *,
+    workers: int,
+    client=None,
+    progress_channel_factory=DockerProgressChannel,
+) -> None:
+    """Run one backend container per byte range and merge partial results."""
+    ranges = plan_worker_ranges(input_path, workers)
+    output_path = output_path.resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    progress_lock = threading.Lock()
+    progress_context = _create_progress(transient=True) if _should_render_progress() else nullcontext(None)
+
+    with (
+        ContainerCleanupRegistry() as container_registry,
+        tempfile.TemporaryDirectory(prefix=f"{output_path.stem}.parts.", dir=output_path.parent) as tmpdir_name,
+        progress_context as progress,
+    ):
+        tmpdir = Path(tmpdir_name)
+        part_paths = [_part_output_path(tmpdir, output_path, index) for index in range(len(ranges))]
+        task_ids: list[TaskID | None] = []
+        if progress is not None:
+            for index, (start, end) in enumerate(ranges):
+                task_ids.append(
+                    progress.add_task(
+                        f"{backend_name} worker {index + 1}/{len(ranges)}",
+                        total=end - start,
+                    )
+                )
+        else:
+            task_ids = [None] * len(ranges)
+
+        def submit_workers(executor: ThreadPoolExecutor):
+            futures = []
+            for index, ((start, end), part_path, task_id) in enumerate(zip(ranges, part_paths, task_ids), start=1):
+                futures.append(executor.submit(
+                    run_backend_container,
+                    backend_name,
+                    input_path,
+                    exec_mode,
+                    part_path,
+                    client=client,
+                    progress_channel_factory=progress_channel_factory,
+                    byte_start=start,
+                    byte_end=end,
+                    progress=progress,
+                    task_id=task_id,
+                    progress_lock=progress_lock,
+                    worker_label=f"{backend_name} worker {index}/{len(ranges)}",
+                    container_registry=container_registry,
+                ))
+            return futures
+
+        _run_parallel_futures(
+            submit_workers,
+            worker_count=len(ranges),
+        )
+        _merge_csv_parts(part_paths, output_path)
+
+
+def validate_backend_containers_parallel(
+    backend_name: str,
+    input_path: Path,
+    exec_mode: int,
+    output_path: Path | None = None,
+    *,
+    workers: int,
+    client=None,
+    progress_channel_factory=DockerProgressChannel,
+) -> None:
+    """Run one validation container per byte range and merge discrepancy outputs."""
+    ranges = plan_worker_ranges(input_path, workers)
+    if output_path is not None:
+        output_path = output_path.resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    progress_lock = threading.Lock()
+    progress_context = _create_progress(transient=True) if _should_render_progress() else nullcontext(None)
+
+    with (
+        ContainerCleanupRegistry() as container_registry,
+        tempfile.TemporaryDirectory(
+            prefix=f"{backend_name}.validate.parts.",
+            dir=(output_path.parent if output_path is not None else None),
+        ) as tmpdir_name,
+        progress_context as progress,
+    ):
+        tmpdir = Path(tmpdir_name)
+        part_paths = [_part_output_path(tmpdir, Path("failures.json"), index) for index in range(len(ranges))]
+        task_ids: list[TaskID | None] = []
+        if progress is not None:
+            for index, (start, end) in enumerate(ranges):
+                task_ids.append(
+                    progress.add_task(
+                        f"{backend_name} validate {index + 1}/{len(ranges)}",
+                        total=end - start,
+                    )
+                )
+        else:
+            task_ids = [None] * len(ranges)
+
+        def submit_workers(executor: ThreadPoolExecutor):
+            futures = []
+            for index, ((start, end), part_path, task_id) in enumerate(zip(ranges, part_paths, task_ids), start=1):
+                futures.append(executor.submit(
+                    validate_backend_container,
+                    backend_name,
+                    input_path,
+                    exec_mode,
+                    output_path=part_path,
+                    client=client,
+                    progress_channel_factory=progress_channel_factory,
+                    byte_start=start,
+                    byte_end=end,
+                    progress=progress,
+                    task_id=task_id,
+                    progress_lock=progress_lock,
+                    worker_label=f"{backend_name} validate {index}/{len(ranges)}",
+                    allow_discrepancies=True,
+                    container_registry=container_registry,
+                ))
+            return futures
+
+        results: list[int] = []
+
+        def submit_and_collect(executor: ThreadPoolExecutor):
+            futures = submit_workers(executor)
+
+            class _CollectingFuture:
+                def __init__(self, future) -> None:
+                    self.future = future
+
+                def result(self):
+                    results.append(self.future.result())
+
+            return [_CollectingFuture(future) for future in futures]
+
+        _run_parallel_futures(
+            submit_and_collect,
+            worker_count=len(ranges),
+        )
+
+        if output_path is not None:
+            _merge_json_arrays(part_paths, output_path)
+
+        if any(status_code == 1 for status_code in results):
+            raise RuntimeError("Validation found discrepancies")
 
 
 def list_backends(containers_dir: Path = CONTAINERS_DIR) -> list[str]:
@@ -300,6 +666,13 @@ def run_backend_container(
     *,
     client=None,
     progress_channel_factory=DockerProgressChannel,
+    byte_start: int | None = None,
+    byte_end: int | None = None,
+    progress: Progress | None = None,
+    task_id: TaskID | None = None,
+    progress_lock: threading.Lock | None = None,
+    worker_label: str | None = None,
+    container_registry: ContainerCleanupRegistry | None = None,
 ) -> None:
     """Run a built backend container to completion."""
     _run_backend_container(
@@ -310,6 +683,13 @@ def run_backend_container(
         output_path=output_path,
         client=client,
         progress_channel_factory=progress_channel_factory,
+        byte_start=byte_start,
+        byte_end=byte_end,
+        progress=progress,
+        task_id=task_id,
+        progress_lock=progress_lock,
+        worker_label=worker_label,
+        container_registry=container_registry,
     )
 
 
@@ -321,9 +701,17 @@ def validate_backend_container(
     *,
     client=None,
     progress_channel_factory=DockerProgressChannel,
-) -> None:
+    byte_start: int | None = None,
+    byte_end: int | None = None,
+    progress: Progress | None = None,
+    task_id: TaskID | None = None,
+    progress_lock: threading.Lock | None = None,
+    worker_label: str | None = None,
+    allow_discrepancies: bool = False,
+    container_registry: ContainerCleanupRegistry | None = None,
+) -> int:
     """Run backend validation inside a container."""
-    _run_backend_container(
+    return _run_backend_container(
         backend_name,
         exec_mode=exec_mode,
         subcommand="validate",
@@ -331,6 +719,14 @@ def validate_backend_container(
         output_path=output_path,
         client=client,
         progress_channel_factory=progress_channel_factory,
+        byte_start=byte_start,
+        byte_end=byte_end,
+        progress=progress,
+        task_id=task_id,
+        progress_lock=progress_lock,
+        worker_label=worker_label,
+        allow_discrepancies=allow_discrepancies,
+        container_registry=container_registry,
     )
 
 
@@ -343,7 +739,15 @@ def _run_backend_container(
     *,
     client=None,
     progress_channel_factory=DockerProgressChannel,
-) -> None:
+    byte_start: int | None = None,
+    byte_end: int | None = None,
+    progress: Progress | None = None,
+    task_id: TaskID | None = None,
+    progress_lock: threading.Lock | None = None,
+    worker_label: str | None = None,
+    allow_discrepancies: bool = False,
+    container_registry: ContainerCleanupRegistry | None = None,
+) -> int:
     """Run a built backend container to completion."""
     client = client or docker.from_env()
     image = image_name_for_backend(backend_name)
@@ -376,6 +780,10 @@ def _run_backend_container(
     with progress_channel_factory(input_path, subcommand) as progress_channel:
         if progress_channel.mount_dir is None:
             raise RuntimeError("Progress channel did not expose a mount directory")
+        if byte_start is not None or byte_end is not None:
+            start = 0 if byte_start is None else byte_start
+            end = input_path.stat().st_size if byte_end is None else byte_end
+            progress_channel.total_bytes = max(0, end - start)
         volumes[str(progress_channel.mount_dir)] = {"bind": str(PROGRESS_MOUNT_DIR), "mode": "rw"}
 
         logger.info("Running backend container %s", image)
@@ -393,24 +801,46 @@ def _run_backend_container(
                 "--output",
                 str(output_arg),
             ])
+        if byte_start is not None:
+            command.extend([
+                "--byte-start",
+                str(byte_start),
+            ])
+        if byte_end is not None:
+            command.extend([
+                "--byte-end",
+                str(byte_end),
+            ])
         command.extend([
             "--progress-socket",
             str(progress_channel.container_socket_path),
         ])
-        container = client.containers.run(
-            image=image,
-            command=command,
-            volumes=volumes,
-            detach=True,
-            remove=False,
-        )
-
-        try:
-            status_code = progress_channel.track_container(container, backend_name)
+        with _tracked_container(
+            client.containers.run(
+                image=image,
+                command=command,
+                volumes=volumes,
+                detach=True,
+                remove=False,
+            ),
+            registry=container_registry,
+        ) as container:
+            status_code = progress_channel.track_container(
+                container,
+                backend_name,
+                progress=progress,
+                task_id=task_id,
+                progress_lock=progress_lock,
+                log_label=worker_label,
+            )
+            if subcommand == "validate" and status_code == 1 and allow_discrepancies:
+                return status_code
             if status_code != 0:
-                raise RuntimeError(f"Backend {backend_name!r} exited with code {status_code}")
-        finally:
-            container.remove(force=True)
+                label = backend_name if worker_label is None else worker_label
+                if subcommand == "validate" and status_code == 1:
+                    raise RuntimeError("Validation found discrepancies")
+                raise RuntimeError(f"Backend {label!r} exited with code {status_code}")
+            return status_code
 
 
 def run_backend_in_docker(
@@ -418,11 +848,23 @@ def run_backend_in_docker(
     backend_name: str,
     exec_mode: int,
     output_path: Path,
+    workers: int = 1,
 ) -> None:
     """Build and run a backend container."""
     client = docker.from_env()
     build_backend_image(backend_name, client=client)
-    run_backend_container(backend_name, input_path, exec_mode, output_path, client=client)
+    if workers == 1:
+        run_backend_container(backend_name, input_path, exec_mode, output_path, client=client)
+        return
+
+    run_backend_containers_parallel(
+        backend_name,
+        input_path,
+        exec_mode,
+        output_path,
+        workers=workers,
+        client=client,
+    )
 
 
 def validate_backend_in_docker(
@@ -430,8 +872,20 @@ def validate_backend_in_docker(
     backend_name: str,
     exec_mode: int,
     output_path: Path | None = None,
+    workers: int = 1,
 ) -> None:
     """Build and run backend validation inside a container."""
     client = docker.from_env()
     build_backend_image(backend_name, client=client)
-    validate_backend_container(backend_name, input_path, exec_mode, output_path=output_path, client=client)
+    if workers == 1:
+        validate_backend_container(backend_name, input_path, exec_mode, output_path=output_path, client=client)
+        return
+
+    validate_backend_containers_parallel(
+        backend_name,
+        input_path,
+        exec_mode,
+        output_path=output_path,
+        workers=workers,
+        client=client,
+    )

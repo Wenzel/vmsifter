@@ -127,3 +127,33 @@ def test_validate_reports_byte_progress_over_unix_socket(tmp_path: Path):
     assert messages[0]["current"] == 0
     assert messages[-1]["current"] == input_path.stat().st_size
     assert messages[-1]["done"] is True
+
+
+def test_validate_processes_only_the_assigned_byte_range(tmp_path: Path):
+    input_path = tmp_path / "catalog.csv"
+    output_path = tmp_path / "failures.json"
+    input_path.write_text(
+        "\n".join([
+            "insn,length,exit-type,misc,reg-delta",
+            "90,1,vmexit:37,,",
+            "0f1f00,2,vmexit:37,,",
+        ]) + "\n",
+        encoding="ascii",
+    )
+
+    with open(input_path, "rb") as stream:
+        stream.readline()
+        stream.readline()
+        second_start = stream.tell()
+
+    summary = validate(
+        input_path,
+        FakeBackend(exec_mode=64),
+        output_path=output_path,
+        byte_start=second_start,
+    )
+
+    assert summary.total_rows == 1
+    assert summary.discrepant_rows == 1
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert [entry["reference"]["insn"] for entry in payload] == ["0f1f00"]

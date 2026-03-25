@@ -11,7 +11,7 @@ from pathlib import Path
 
 import rich.progress
 
-from bench.progress import ByteCountingTextReader, ProgressReporter
+from bench.progress import ByteCountingTextReader, ByteRangeTextReader, ProgressReporter
 from bench.schema import Backend, BackendResult, ParsedExitType, ReferenceRow, ValidationReport
 
 logger = logging.getLogger(__name__)
@@ -62,9 +62,19 @@ def validate(
     backend: Backend,
     output_path: Path | None = None,
     progress_socket: Path | None = None,
+    byte_start: int | None = None,
+    byte_end: int | None = None,
 ) -> ValidationSummary:
     """Read an input CSV, validate it against a backend, and log discrepancies."""
-    total_bytes = input_path.stat().st_size
+    fieldnames, data_start = _read_input_header(input_path)
+    if "insn" not in fieldnames:
+        logger.error("Input CSV missing 'insn' column")
+        raise SystemExit(1)
+
+    use_byte_range = byte_start is not None or byte_end is not None
+    range_start = data_start if byte_start is None else max(byte_start, data_start)
+    range_end = input_path.stat().st_size if byte_end is None else max(byte_end, range_start)
+    total_bytes = range_end - range_start if use_byte_range else input_path.stat().st_size
     total_rows = 0
     comparable_rows = 0
     discrepant_rows = 0
@@ -72,13 +82,16 @@ def validate(
     failures: list[ValidationFailure] = []
 
     with (
-        _open_input(input_path, description="Validating", progress_socket=progress_socket) as inf,
+        _open_input(
+            input_path,
+            description="Validating",
+            progress_socket=progress_socket,
+            byte_start=range_start if use_byte_range else None,
+            byte_end=range_end if use_byte_range else None,
+        ) as inf,
         ProgressReporter(progress_socket, phase="validate", every=64 * 1024) as reporter,
     ):
-        reader = csv.DictReader(inf)
-        if "insn" not in (reader.fieldnames or []):
-            logger.error("Input CSV missing 'insn' column")
-            raise SystemExit(1)
+        reader = csv.DictReader(inf, fieldnames=fieldnames if use_byte_range else None)
 
         for row in reader:
             if progress_socket is not None:
@@ -138,9 +151,39 @@ def validate(
     return summary
 
 
+def _read_input_header(input_path: Path) -> tuple[list[str], int]:
+    """Read the CSV header row and return field names plus the first data offset."""
+    with open(input_path, "rb") as raw:
+        header = raw.readline()
+        data_start = raw.tell()
+    if not header:
+        logger.error("Input CSV is empty")
+        raise SystemExit(1)
+
+    fieldnames = next(csv.reader([header.decode("utf-8").rstrip("\r\n")]), [])
+    if not fieldnames:
+        logger.error("Input CSV header is empty")
+        raise SystemExit(1)
+    return fieldnames, data_start
+
+
 @contextmanager
-def _open_input(input_path: Path, *, description: str, progress_socket: Path | None):
+def _open_input(
+    input_path: Path,
+    *,
+    description: str,
+    progress_socket: Path | None,
+    byte_start: int | None = None,
+    byte_end: int | None = None,
+):
     """Open an input CSV, keeping Rich progress for direct interactive runs only."""
+    if byte_start is not None or byte_end is not None:
+        start = 0 if byte_start is None else byte_start
+        end = input_path.stat().st_size if byte_end is None else byte_end
+        with ByteRangeTextReader(input_path, start, end) as inf:
+            yield inf
+        return
+
     if progress_socket is not None:
         with ByteCountingTextReader(input_path) as inf:
             yield inf

@@ -66,6 +66,65 @@ class ByteCountingTextReader:
             self._stream = None
 
 
+class ByteRangeTextReader:
+    """Iterate over a byte range in a text file while tracking consumed bytes."""
+
+    def __init__(
+        self,
+        path: Path,
+        start_byte: int,
+        end_byte: int,
+        *,
+        encoding: str = "utf-8",
+    ) -> None:
+        self.path = path
+        self.start_byte = start_byte
+        self.end_byte = end_byte
+        self.encoding = encoding
+        self.bytes_read = 0
+        self._stream = None
+
+    def __enter__(self) -> "ByteRangeTextReader":
+        self._stream = open(self.path, "rb")
+        self._stream.seek(self.start_byte)
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def __iter__(self) -> "ByteRangeTextReader":
+        return self
+
+    def __next__(self) -> str:
+        line = self.readline()
+        if line == "":
+            raise StopIteration
+        return line
+
+    def readline(self) -> str:
+        """Read one full CSV record line within the configured byte range."""
+        if self._stream is None:
+            raise ValueError("I/O operation on closed file")
+        if self._stream.tell() >= self.end_byte:
+            return ""
+
+        chunk = self._stream.readline()
+        if not chunk:
+            return ""
+
+        self.bytes_read += len(chunk)
+        return chunk.decode(self.encoding)
+
+    def close(self) -> None:
+        """Close the wrapped file if it is open."""
+        if self._stream is None:
+            return
+        try:
+            self._stream.close()
+        finally:
+            self._stream = None
+
+
 class ProgressReporter:
     """Send throttled progress updates over an optional Unix socket."""
 

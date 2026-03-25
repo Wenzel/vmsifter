@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import socket
 import threading
@@ -61,3 +62,32 @@ def test_runner_reports_progress_over_unix_socket(tmp_path: Path, monkeypatch):
     assert messages[0]["current"] == 0
     assert messages[-1]["current"] == input_path.stat().st_size
     assert messages[-1]["done"] is True
+
+
+def test_runner_processes_only_the_assigned_byte_range(tmp_path: Path):
+    input_path = tmp_path / "catalog.csv"
+    output_path = tmp_path / "results.csv"
+    input_path.write_text("insn\n90\n0f0b\ncc\n", encoding="ascii")
+
+    with open(input_path, "rb") as stream:
+        stream.readline()
+        first_start = stream.tell()
+        stream.readline()
+        second_start = stream.tell()
+        stream.readline()
+        third_start = stream.tell()
+
+    runner_module.run(
+        input_path,
+        FakeBackend(exec_mode=64),
+        64,
+        output_path,
+        byte_start=second_start,
+        byte_end=third_start,
+    )
+
+    with open(output_path, newline="") as result_file:
+        rows = list(csv.DictReader(result_file))
+
+    assert [row["insn"] for row in rows] == ["0f0b"]
+    assert first_start < second_start < third_start

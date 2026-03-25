@@ -15,7 +15,12 @@ from bench.docker_runtime import (
     image_name_for_backend,
     list_backends,
     run_backend_container,
+    run_backend_containers_parallel,
+    run_backend_in_docker,
+    plan_worker_ranges,
     validate_backend_container,
+    validate_backend_containers_parallel,
+    validate_backend_in_docker,
 )
 
 
@@ -83,8 +88,46 @@ class FakeProgressChannel:
     def __exit__(self, exc_type, exc, tb) -> None:
         return None
 
-    def track_container(self, container, backend_name: str) -> int:
+    def track_container(
+        self,
+        container,
+        backend_name: str,
+        *,
+        progress=None,
+        task_id=None,
+        progress_lock=None,
+        log_label: str | None = None,
+    ) -> int:
         return 0
+
+
+class InterruptingFuture:
+    def __init__(self, *, raises: bool) -> None:
+        self.raises = raises
+
+    def result(self):
+        if self.raises:
+            raise KeyboardInterrupt()
+        return None
+
+
+class FakeExecutor:
+    instances = []
+
+    def __init__(self, max_workers: int) -> None:
+        self.max_workers = max_workers
+        self.shutdown_calls = []
+        self._submit_count = 0
+        type(self).instances.append(self)
+
+    def submit(self, fn, *args, **kwargs):
+        fn(*args, **kwargs)
+        future = InterruptingFuture(raises=self._submit_count == 0)
+        self._submit_count += 1
+        return future
+
+    def shutdown(self, wait: bool, cancel_futures: bool = False) -> None:
+        self.shutdown_calls.append((wait, cancel_futures))
 
 
 def test_list_backends_discovers_container_directories(tmp_path: Path):
@@ -201,6 +244,15 @@ def test_render_progress_adds_eta_column(tmp_path: Path, monkeypatch):
     assert any(isinstance(column, TimeRemainingColumn) for column in captured["columns"])
 
 
+def test_plan_worker_ranges_aligns_on_row_boundaries(tmp_path: Path):
+    input_path = tmp_path / "catalog.csv"
+    input_path.write_text("insn\n90\n0f0b\ncc\n", encoding="ascii")
+
+    ranges = plan_worker_ranges(input_path, 3)
+
+    assert ranges == [(5, 8), (8, 13), (13, 16)]
+
+
 def test_run_backend_container_mounts_shared_directory_once(tmp_path: Path):
     client = FakeClient()
     input_path = tmp_path / "catalog.csv"
@@ -228,6 +280,53 @@ def test_run_backend_container_mounts_shared_directory_once(tmp_path: Path):
             "64",
             "--output",
             "/work/results_xed.csv",
+            "--progress-socket",
+            "/progress/progress.sock",
+        ],
+        "volumes": {
+            str(tmp_path.resolve()): {"bind": "/work", "mode": "rw"},
+            "/tmp/fake-progress": {"bind": "/progress", "mode": "rw"},
+        },
+        "detach": True,
+        "remove": False,
+    }]
+    assert client.containers.last_container.removed == [True]
+
+
+def test_run_backend_container_passes_byte_range_arguments(tmp_path: Path):
+    client = FakeClient()
+    input_path = tmp_path / "catalog.csv"
+    output_path = tmp_path / "results_xed.csv"
+    input_path.write_text("insn\n90\n", encoding="ascii")
+
+    run_backend_container(
+        "xed",
+        input_path,
+        64,
+        output_path,
+        client=client,
+        progress_channel_factory=FakeProgressChannel,
+        byte_start=5,
+        byte_end=8,
+        worker_label="xed worker 1/2",
+    )
+
+    assert client.containers.calls == [{
+        "image": "vmsifter-bench/xed:dev",
+        "command": [
+            "run",
+            "--input",
+            "/work/catalog.csv",
+            "--backend",
+            "xed",
+            "--exec-mode",
+            "64",
+            "--output",
+            "/work/results_xed.csv",
+            "--byte-start",
+            "5",
+            "--byte-end",
+            "8",
             "--progress-socket",
             "/progress/progress.sock",
         ],
@@ -315,3 +414,237 @@ def test_validate_backend_container_with_output_mounts_shared_directory(tmp_path
         "remove": False,
     }]
     assert client.containers.last_container.removed == [True]
+
+
+def test_validate_backend_container_passes_byte_range_arguments(tmp_path: Path):
+    client = FakeClient()
+    input_path = tmp_path / "catalog.csv"
+    output_path = tmp_path / "failures.json"
+    input_path.write_text("insn\n90\n", encoding="ascii")
+
+    validate_backend_container(
+        "xed",
+        input_path,
+        64,
+        output_path=output_path,
+        client=client,
+        progress_channel_factory=FakeProgressChannel,
+        byte_start=5,
+        byte_end=8,
+        worker_label="xed validate 1/2",
+    )
+
+    assert client.containers.calls == [{
+        "image": "vmsifter-bench/xed:dev",
+        "command": [
+            "validate",
+            "--input",
+            "/work/catalog.csv",
+            "--backend",
+            "xed",
+            "--exec-mode",
+            "64",
+            "--output",
+            "/work/failures.json",
+            "--byte-start",
+            "5",
+            "--byte-end",
+            "8",
+            "--progress-socket",
+            "/progress/progress.sock",
+        ],
+        "volumes": {
+            str(tmp_path.resolve()): {"bind": "/work", "mode": "rw"},
+            "/tmp/fake-progress": {"bind": "/progress", "mode": "rw"},
+        },
+        "detach": True,
+        "remove": False,
+    }]
+    assert client.containers.last_container.removed == [True]
+
+
+def test_run_backend_containers_parallel_merges_partial_outputs(tmp_path: Path, monkeypatch):
+    input_path = tmp_path / "catalog.csv"
+    output_path = tmp_path / "results_xed.csv"
+    input_path.write_text("insn\n90\ncc\n", encoding="ascii")
+
+    calls = []
+
+    def fake_run_backend_container(
+        backend_name: str,
+        input_file: Path,
+        exec_mode: int,
+        part_output: Path,
+        *,
+        client=None,
+        progress_channel_factory=DockerProgressChannel,
+        byte_start: int | None = None,
+        byte_end: int | None = None,
+        progress=None,
+        task_id=None,
+        progress_lock=None,
+        worker_label: str | None = None,
+        container_registry=None,
+    ) -> None:
+        calls.append((backend_name, input_file, exec_mode, byte_start, byte_end, worker_label))
+        part_output.write_text(
+            "insn,valid,length,exit_type,reg_delta,backend,exec_mode,misc\n"
+            f"{byte_start}-{byte_end},True,1,valid,,{backend_name},{exec_mode},\n",
+            encoding="ascii",
+        )
+
+    monkeypatch.setattr(docker_runtime_module, "run_backend_container", fake_run_backend_container)
+    monkeypatch.setattr(docker_runtime_module, "_should_render_progress", lambda: False)
+
+    run_backend_containers_parallel("xed", input_path, 64, output_path, workers=2, client=object())
+
+    assert len(calls) == 2
+    assert output_path.read_text(encoding="ascii") == (
+        "insn,valid,length,exit_type,reg_delta,backend,exec_mode,misc\n"
+        "5-8,True,1,valid,,xed,64,\n"
+        "8-11,True,1,valid,,xed,64,\n"
+    )
+
+
+def test_run_backend_in_docker_uses_parallel_path_when_workers_gt_one(tmp_path: Path, monkeypatch):
+    input_path = tmp_path / "catalog.csv"
+    output_path = tmp_path / "results_xed.csv"
+    input_path.write_text("insn\n90\n", encoding="ascii")
+
+    client = object()
+    build_calls = []
+    parallel_calls = []
+
+    monkeypatch.setattr(docker_runtime_module.docker, "from_env", lambda: client)
+    monkeypatch.setattr(
+        docker_runtime_module,
+        "build_backend_image",
+        lambda backend_name, *, client=None: build_calls.append((backend_name, client)),
+    )
+    monkeypatch.setattr(
+        docker_runtime_module,
+        "run_backend_containers_parallel",
+        lambda backend_name, input_file, exec_mode, output_file, *, workers, client=None, progress_channel_factory=DockerProgressChannel:
+        parallel_calls.append((backend_name, input_file, exec_mode, output_file, workers, client)),
+    )
+
+    run_backend_in_docker(input_path, "xed", 64, output_path, workers=3)
+
+    assert build_calls == [("xed", client)]
+    assert parallel_calls == [("xed", input_path, 64, output_path, 3, client)]
+
+
+def test_parallel_run_cleans_up_started_containers_on_interrupt(tmp_path: Path, monkeypatch):
+    input_path = tmp_path / "catalog.csv"
+    output_path = tmp_path / "results_xed.csv"
+    input_path.write_text("insn\n90\ncc\n", encoding="ascii")
+    started = []
+
+    def fake_run_backend_container(
+        backend_name: str,
+        input_file: Path,
+        exec_mode: int,
+        part_output: Path,
+        *,
+        client=None,
+        progress_channel_factory=DockerProgressChannel,
+        byte_start: int | None = None,
+        byte_end: int | None = None,
+        progress=None,
+        task_id=None,
+        progress_lock=None,
+        worker_label: str | None = None,
+        container_registry=None,
+    ) -> None:
+        container = FakeContainer()
+        started.append(container)
+        if container_registry is not None:
+            container_registry.track(container)
+
+    FakeExecutor.instances.clear()
+    monkeypatch.setattr(docker_runtime_module, "run_backend_container", fake_run_backend_container)
+    monkeypatch.setattr(docker_runtime_module, "_should_render_progress", lambda: False)
+    monkeypatch.setattr(docker_runtime_module, "ThreadPoolExecutor", FakeExecutor)
+
+    try:
+        run_backend_containers_parallel("xed", input_path, 64, output_path, workers=2, client=object())
+    except KeyboardInterrupt:
+        pass
+    else:  # pragma: no cover - defensive
+        raise AssertionError("Expected KeyboardInterrupt")
+
+    assert len(started) == 2
+    assert [container.removed for container in started] == [[True], [True]]
+    assert FakeExecutor.instances[0].shutdown_calls == [(False, True)]
+
+
+def test_validate_backend_containers_parallel_merges_json_outputs(tmp_path: Path, monkeypatch):
+    input_path = tmp_path / "catalog.csv"
+    output_path = tmp_path / "failures.json"
+    input_path.write_text("insn\n90\ncc\n", encoding="ascii")
+
+    calls = []
+
+    def fake_validate_backend_container(
+        backend_name: str,
+        input_file: Path,
+        exec_mode: int,
+        output_path: Path | None = None,
+        *,
+        client=None,
+        progress_channel_factory=DockerProgressChannel,
+        byte_start: int | None = None,
+        byte_end: int | None = None,
+        progress=None,
+        task_id=None,
+        progress_lock=None,
+        worker_label: str | None = None,
+        allow_discrepancies: bool = False,
+        container_registry=None,
+    ) -> int:
+        calls.append((backend_name, input_file, exec_mode, byte_start, byte_end, worker_label, allow_discrepancies))
+        assert output_path is not None
+        output_path.write_text(f'[{{"start": {byte_start}, "end": {byte_end}}}]', encoding="utf-8")
+        return 1 if byte_start == 5 else 0
+
+    monkeypatch.setattr(docker_runtime_module, "validate_backend_container", fake_validate_backend_container)
+    monkeypatch.setattr(docker_runtime_module, "_should_render_progress", lambda: False)
+
+    try:
+        validate_backend_containers_parallel("xed", input_path, 64, output_path=output_path, workers=2, client=object())
+    except RuntimeError as exc:
+        assert str(exc) == "Validation found discrepancies"
+    else:  # pragma: no cover - defensive
+        raise AssertionError("Expected validation discrepancies to raise")
+
+    assert len(calls) == 2
+    assert all(call[-1] is True for call in calls)
+    assert output_path.read_text(encoding="utf-8") == '[\n  {\n    "start": 5,\n    "end": 8\n  },\n  {\n    "start": 8,\n    "end": 11\n  }\n]'
+
+
+def test_validate_backend_in_docker_uses_parallel_path_when_workers_gt_one(tmp_path: Path, monkeypatch):
+    input_path = tmp_path / "catalog.csv"
+    output_path = tmp_path / "failures.json"
+    input_path.write_text("insn\n90\n", encoding="ascii")
+
+    client = object()
+    build_calls = []
+    parallel_calls = []
+
+    monkeypatch.setattr(docker_runtime_module.docker, "from_env", lambda: client)
+    monkeypatch.setattr(
+        docker_runtime_module,
+        "build_backend_image",
+        lambda backend_name, *, client=None: build_calls.append((backend_name, client)),
+    )
+    monkeypatch.setattr(
+        docker_runtime_module,
+        "validate_backend_containers_parallel",
+        lambda backend_name, input_file, exec_mode, output_path=None, *, workers, client=None, progress_channel_factory=DockerProgressChannel:
+        parallel_calls.append((backend_name, input_file, exec_mode, output_path, workers, client)),
+    )
+
+    validate_backend_in_docker(input_path, "xed", 64, output_path=output_path, workers=3)
+
+    assert build_calls == [("xed", client)]
+    assert parallel_calls == [("xed", input_path, 64, output_path, 3, client)]

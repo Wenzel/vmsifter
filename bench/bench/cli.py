@@ -26,6 +26,7 @@ def main(ctx: click.Context, debug: bool) -> None:
 @click.option("-i", "--input", "input_path", required=True, type=click.Path(exists=True, path_type=Path))
 @click.option("-b", "--backend", "backend_name", required=True, type=str)
 @click.option("--exec-mode", type=click.Choice(["32", "64"]), default="64", show_default=True)
+@click.option("-j", "--workers", type=click.IntRange(min=1), default=1, show_default=True)
 @click.option("--output-dir", type=click.Path(path_type=Path), default=Path("."), show_default=True)
 @click.option("-o", "--output", "output_file", type=click.Path(path_type=Path), default=None,
               help="Explicit output file path (overrides --output-dir).")
@@ -33,6 +34,7 @@ def run(
     input_path: Path,
     backend_name: str,
     exec_mode: str,
+    workers: int,
     output_dir: Path,
     output_file: Path | None,
 ) -> None:
@@ -42,9 +44,9 @@ def run(
     if output_file is None:
         output_file = output_dir / f"results_{backend_name}.csv"
 
-    click.echo(f"Backend: {backend_name} | Mode: {mode}-bit | Input: {input_path}")
+    click.echo(f"Backend: {backend_name} | Mode: {mode}-bit | Workers: {workers} | Input: {input_path}")
     try:
-        run_backend_in_docker(input_path, backend_name, mode, output_file)
+        run_backend_in_docker(input_path, backend_name, mode, output_file, workers=workers)
     except RuntimeError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Output: {output_file}")
@@ -54,14 +56,15 @@ def run(
 @click.option("-i", "--input", "input_path", required=True, type=click.Path(exists=True, path_type=Path))
 @click.option("-b", "--backend", "backend_name", required=True, type=str)
 @click.option("--exec-mode", type=click.Choice(["32", "64"]), default="64", show_default=True)
+@click.option("-j", "--workers", type=click.IntRange(min=1), default=1, show_default=True)
 @click.option("-o", "--output", "output_path", type=click.Path(path_type=Path), default=None,
               help="Optional JSON file to write discrepant rows to.")
-def validate(input_path: Path, backend_name: str, exec_mode: str, output_path: Path | None) -> None:
+def validate(input_path: Path, backend_name: str, exec_mode: str, workers: int, output_path: Path | None) -> None:
     """Validate an input CSV against a backend without writing a results file."""
     mode = int(exec_mode)
-    click.echo(f"Backend: {backend_name} | Mode: {mode}-bit | Input: {input_path}")
+    click.echo(f"Backend: {backend_name} | Mode: {mode}-bit | Workers: {workers} | Input: {input_path}")
     try:
-        validate_backend_in_docker(input_path, backend_name, mode, output_path=output_path)
+        validate_backend_in_docker(input_path, backend_name, mode, output_path=output_path, workers=workers)
     except RuntimeError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo("Validation succeeded.")

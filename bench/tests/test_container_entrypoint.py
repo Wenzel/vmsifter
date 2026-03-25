@@ -34,6 +34,8 @@ def test_main_passes_progress_socket_to_runner(monkeypatch):
             backend_name="xed",
             exec_mode=64,
             progress_socket=progress_socket,
+            byte_start=123,
+            byte_end=456,
         ),
     )
     monkeypatch.setattr(container_entrypoint, "get_backend", lambda *args, **kwargs: FakeBackendContext(backend))
@@ -43,7 +45,7 @@ def test_main_passes_progress_socket_to_runner(monkeypatch):
 
     assert calls == [(
         (Path("/input/catalog.csv"), backend, 64, Path("/output/results.csv")),
-        {"progress_socket": progress_socket},
+        {"progress_socket": progress_socket, "byte_start": 123, "byte_end": 456},
     )]
 
 
@@ -62,6 +64,8 @@ def test_main_passes_progress_socket_to_validator(monkeypatch):
             backend_name="xed",
             exec_mode=64,
             progress_socket=progress_socket,
+            byte_start=123,
+            byte_end=456,
         ),
     )
     monkeypatch.setattr(container_entrypoint, "get_backend", lambda *args, **kwargs: FakeBackendContext(backend))
@@ -75,5 +79,5 @@ def test_main_passes_progress_socket_to_validator(monkeypatch):
 
     assert calls == [(
         (Path("/input/catalog.csv"), backend, Path("/output/failures.json")),
-        {"progress_socket": progress_socket},
+        {"progress_socket": progress_socket, "byte_start": 123, "byte_end": 456},
     )]
