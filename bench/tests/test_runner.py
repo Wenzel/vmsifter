@@ -105,3 +105,17 @@ def test_runner_logs_invalid_insn_hex_with_row_context(tmp_path: Path, caplog):
 
     assert "CSV row 2" in caplog.text
     assert "insn='zz'" in caplog.text
+
+
+def test_runner_skips_embedded_header_rows(tmp_path: Path, caplog):
+    input_path = tmp_path / "catalog.csv"
+    output_path = tmp_path / "results.csv"
+    input_path.write_text("insn\n90\ninsn\n0f0b\n", encoding="ascii")
+
+    runner_module.run(input_path, FakeBackend(exec_mode=64), 64, output_path)
+
+    with open(output_path, newline="") as result_file:
+        rows = list(csv.DictReader(result_file))
+
+    assert [row["insn"] for row in rows] == ["90", "0f0b"]
+    assert "Skipping embedded CSV header at row 3" in caplog.text

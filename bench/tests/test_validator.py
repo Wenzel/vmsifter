@@ -176,3 +176,24 @@ def test_validate_logs_invalid_insn_hex_with_row_context(tmp_path: Path, caplog)
 
     assert "CSV row 2" in caplog.text
     assert "insn='zz'" in caplog.text
+
+
+def test_validate_skips_embedded_header_rows(tmp_path: Path, caplog):
+    input_path = tmp_path / "catalog.csv"
+    input_path.write_text(
+        "\n".join([
+            "insn,length,exit-type,misc,reg-delta",
+            "90,1,vmexit:37,,",
+            "insn,length,exit-type,misc,reg-delta",
+            "0f1f00,2,vmexit:37,,",
+        ]) + "\n",
+        encoding="ascii",
+    )
+
+    summary = validate(input_path, FakeBackend(exec_mode=64))
+
+    assert summary.total_rows == 2
+    assert summary.comparable_rows == 2
+    assert summary.discrepant_rows == 1
+    assert summary.issue_count == 1
+    assert "Skipping embedded CSV header at row 3" in caplog.text

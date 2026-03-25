@@ -109,10 +109,12 @@ def validate(
             if not insn_hex:
                 continue
 
-            total_rows += 1
             try:
                 reference = ReferenceRow.from_csv_row(row)
             except InvalidInstructionHexError as exc:
+                if exc.insn_hex == "insn":
+                    logger.warning("Skipping embedded CSV header at row %d", row_number)
+                    continue
                 _log_invalid_input_row(
                     row_number,
                     exc,
@@ -120,6 +122,8 @@ def validate(
                     byte_end=range_end if use_byte_range else None,
                 )
                 raise SystemExit(1) from exc
+
+            total_rows += 1
             result = backend.process(reference.insn)
             report = backend.validate(reference, result)
             if not report.comparable:

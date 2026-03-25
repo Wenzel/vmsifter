@@ -91,6 +91,9 @@ def _process(
             try:
                 insn_bytes = parse_instruction_hex(row)
             except InvalidInstructionHexError as exc:
+                if exc.insn_hex == "insn":
+                    logger.warning("Skipping embedded CSV header at row %d", row_number)
+                    continue
                 _log_invalid_input_row(
                     row_number,
                     exc,
