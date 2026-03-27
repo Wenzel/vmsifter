@@ -6,9 +6,41 @@ from itertools import chain
 import pytest
 
 from vmsifter.config import settings
-from vmsifter.fuzzer import EPT, FuzzerExecResult, Interrupted, Other, TunnelFuzzer
+from vmsifter.fuzzer import ResultView, TunnelFuzzer
 from vmsifter.fuzzer.partition import X86Range, partition
-from vmsifter.injector import EPTQual, EPTQualEnum, ExitReasonEnum, InjectorResultMessage, InjInterruptEnum
+from vmsifter.injector import ExitReasonEnum, InjectorResultMessage
+from vmsifter.injector.types import EPTQualEnum
+
+
+def _make_view(reason=0, qualification=0, insn_length=0, intr_info=0, intr_error=0, **kwargs) -> ResultView:
+    """Helper: create a fresh ResultView backed by a new InjectorResultMessage."""
+    buf = bytearray(InjectorResultMessage.size())
+    msg = InjectorResultMessage.from_buffer(buf)
+    msg.reason = reason
+    msg.qualification = qualification
+    msg.insn_length = insn_length
+    msg.intr_info = intr_info
+    msg.intr_error = intr_error
+    for k, v in kwargs.items():
+        setattr(msg, k, v)
+    return ResultView(msg)
+
+
+def _interrupted_view() -> ResultView:
+    return _make_view(reason=ExitReasonEnum.EXTERNAL_INTERRUPT.value)
+
+
+def _ept_execute_view() -> ResultView:
+    return _make_view(reason=ExitReasonEnum.EPT.value, qualification=EPTQualEnum.EXECUTE.value)
+
+
+def _other_view(reason_enum=ExitReasonEnum.MTF, insn_length=0) -> ResultView:
+    return _make_view(reason=reason_enum.value, insn_length=insn_length)
+
+
+def _view_from_msg(msg: InjectorResultMessage) -> ResultView:
+    """Create a ResultView that reads from the given msg (shares memory)."""
+    return ResultView(msg)
 
 
 def test_tunnel_retry():
@@ -18,9 +50,7 @@ def test_tunnel_retry():
     gen = tun.gen()
     # act
     failed_insn = gen.send(None).tobytes()
-    exec_res = Interrupted()
-    exec_res.exit_reason = ExitReasonEnum.EXTERNAL_INTERRUPT
-    next_insn = gen.send(exec_res).tobytes()
+    next_insn = gen.send(_interrupted_view()).tobytes()
     # assert
     assert failed_insn == next_insn
 
@@ -53,11 +83,8 @@ def test_pagefault_next_insn():
     tun = TunnelFuzzer()
     gen = tun.gen()
     prev_insn = gen.send(None).tobytes()
-    exec_res = EPT()
-    exec_res.eptqual = EPTQual(EPTQualEnum.EXECUTE)
-    exec_res.exit_reason = ExitReasonEnum.EPT
     # act
-    new_insn = gen.send(exec_res).tobytes()
+    new_insn = gen.send(_ept_execute_view()).tobytes()
     # assert
     assert len(new_insn) == len(prev_insn) + 1
     # last element should be set to 0
@@ -70,10 +97,8 @@ def test_same_length_increment_last_byte():
     tun = TunnelFuzzer()
     gen = tun.gen()
     prev_insn = gen.send(None).tobytes()
-    exec_res = Other()
-    exec_res.exit_reason = ExitReasonEnum.MTF
     # act
-    new_insn = gen.send(exec_res).tobytes()
+    new_insn = gen.send(_other_view()).tobytes()
     # assert
     assert new_insn[-1] == prev_insn[-1] + 1
 
@@ -84,10 +109,8 @@ def test_rollover_previous_byte():
     tun = TunnelFuzzer(bytearray([0x04, 0xFF]), marker_idx=1)
     gen = tun.gen()
     prev_insn = gen.send(None).tobytes()
-    exec_res = Other()
-    exec_res.exit_reason = ExitReasonEnum.MTF
     # act
-    new_insn = gen.send(exec_res).tobytes()
+    new_insn = gen.send(_other_view()).tobytes()
     # assert
     assert new_insn == bytes([0x05])
     # marker should be on 0x04 byte
@@ -100,10 +123,8 @@ def test_rollover_multiple_bytes():
     tun = TunnelFuzzer(bytearray(init_content), marker_idx=4)
     gen = tun.gen()
     prev_insn = gen.send(None).tobytes()
-    exec_res = Other()
-    exec_res.exit_reason = ExitReasonEnum.MTF
     # act
-    new_insn = gen.send(exec_res).tobytes()
+    new_insn = gen.send(_other_view()).tobytes()
     # assert
     assert new_insn == bytes([0x04, 0x06])
     assert tun.marker_idx == 1
@@ -118,11 +139,9 @@ def test_marker_moved_new_instruction_length():
     tun = TunnelFuzzer(bytearray(init_content), marker_idx=2)
     gen = tun.gen()
     gen.send(None).tobytes()
-    exec_res = Other()
-    exec_res.exit_reason = ExitReasonEnum.MTF
-    exec_res.rep_length = 7
+    view = _other_view(insn_length=7)
     # act
-    new_insn = gen.send(exec_res).tobytes()
+    new_insn = gen.send(view).tobytes()
     # assert
     # marker should have moved, and last byte incremented
     assert list(new_insn) == [0xC7, 0x04, 0x06, 0x00, 0x00, 0x00, 0x01]
@@ -136,11 +155,8 @@ def test_need_more_bytes_max_insn_size():
     tun = TunnelFuzzer(bytearray(init_content), marker_idx=0)
     gen = tun.gen()
     gen.send(None).tobytes()
-    exec_res = EPT()
-    exec_res.exit_reason = ExitReasonEnum.EPT
-    exec_res.eptqual = EPTQual(EPTQualEnum.EXECUTE)
     # act
-    new_insn = gen.send(exec_res).tobytes()
+    new_insn = gen.send(_ept_execute_view()).tobytes()
     # assert
     assert list(new_insn) == [0x7]
 
@@ -153,12 +169,10 @@ def test_fuzzing_complete(x86_range: X86Range):
     tun = TunnelFuzzer(bytearray(init_content), marker_idx=0, end_first_byte=x86_range.end)
     gen = tun.gen()
     prev_insn = gen.send(None).tobytes()
-    exec_res = Other()
-    exec_res.exit_reason = ExitReasonEnum.APIC_ACCESS
-    exec_res.rep_length = len(prev_insn)
+    view = _other_view(reason_enum=ExitReasonEnum.APIC_ACCESS, insn_length=len(prev_insn))
     # act
     with pytest.raises(StopIteration):
-        gen.send(exec_res)
+        gen.send(view)
 
 
 @pytest.mark.parametrize("mode", ["32", "64"])
@@ -173,10 +187,8 @@ def test_min_prefix(mode):
     gen = tun.gen()
     # act
     prev_insn = gen.send(None).tobytes()
-    exec_res = Other()
-    exec_res.exit_reason = ExitReasonEnum.MTF
-    exec_res.rep_length = len(prev_insn)
-    new_insn = gen.send(exec_res)
+    view = _other_view(insn_length=len(prev_insn))
+    new_insn = gen.send(view)
     # assert
     assert len([b for b in prev_insn if b in settings.x86.prefix]) >= settings.min_prefix_count
     assert len([b for b in prev_insn if b in settings.x86.prefix]) < settings.max_prefix_count
@@ -189,29 +201,110 @@ def test_backward_search():
     gen = tun.gen()
     # act
     gen.send(None)
-    msg = InjectorResultMessage()
-    msg.reason = 37
-    msg.qualification = 0
-    msg.insn_length = 2
-    msg.rip = 0x1FFC
-    exec_res = FuzzerExecResult.factory_from_injector_message(msg)
-    insn_1 = gen.send(exec_res)
-    msg.rip = 0x1FFD
-    exec_res = FuzzerExecResult.factory_from_injector_message(msg)
-    insn_2 = gen.send(exec_res)
-    msg.rip = 0x1FFE
-    exec_res = FuzzerExecResult.factory_from_injector_message(msg)
-    insn_3 = gen.send(exec_res)
-    msg.rip = 0x1FFF
-    exec_res = FuzzerExecResult.factory_from_injector_message(msg)
-    insn_4 = gen.send(exec_res)
-    msg.rip = 0x2000
-    exec_res = FuzzerExecResult.factory_from_injector_message(msg)
+    # Create views with reason=37 (MTF), insn_length=2
+    insn_1 = gen.send(_make_view(reason=37, qualification=0, insn_length=2))
+    insn_2 = gen.send(_make_view(reason=37, qualification=0, insn_length=2))
+    insn_3 = gen.send(_make_view(reason=37, qualification=0, insn_length=2))
+    insn_4 = gen.send(_make_view(reason=37, qualification=0, insn_length=2))
     # assert
     assert list(insn_1) == [0x00, 0xC0, 0x00, 0x00, 0x00]
     assert list(insn_2) == [0x00, 0xC0, 0x00, 0x00]
     assert list(insn_3) == [0x00, 0xC0, 0x00]
     assert list(insn_4) == [0x00, 0xC0]
+
+
+# ── split_remaining / remaining_range_size tests ──
+
+
+@pytest.fixture(autouse=False)
+def _reset_prefix_settings():
+    """Ensure min_prefix_count is reset for split tests that create 1-byte buffers."""
+    old_min = settings.min_prefix_count
+    old_max = settings.max_prefix_count
+    settings.min_prefix_count = 0
+    settings.max_prefix_count = 0
+    settings.prefix_range = range(0, 1)
+    yield
+    settings.min_prefix_count = old_min
+    settings.max_prefix_count = old_max
+    settings.prefix_range = range(old_min, old_max + 1)
+
+
+@pytest.mark.usefixtures("_reset_prefix_settings")
+def test_split_remaining_halves_range():
+    tun = TunnelFuzzer(insn_buffer=bytearray([0x00]), end_first_byte=b"\xFF")
+    new = tun.split_remaining()
+    assert new is not None
+    assert tun.end_first_byte_int == 0x7F  # self shrunk
+    assert new.insn_buffer[0] == 0x7F  # new starts at midpoint
+    assert new.end_first_byte == b"\xFF"  # new ends at original end
+
+
+@pytest.mark.usefixtures("_reset_prefix_settings")
+def test_split_remaining_too_small():
+    tun = TunnelFuzzer(insn_buffer=bytearray([0xFE]), end_first_byte=b"\xFF")
+    assert tun.split_remaining() is None
+
+
+@pytest.mark.usefixtures("_reset_prefix_settings")
+def test_split_remaining_preserves_marker():
+    tun = TunnelFuzzer(insn_buffer=bytearray([0x04, 0x05]), marker_idx=1, end_first_byte=b"\x40")
+    tun.split_remaining()
+    assert tun.marker_idx == 1  # unchanged
+
+
+@pytest.mark.usefixtures("_reset_prefix_settings")
+def test_split_result_picklable():
+    import pickle
+
+    tun = TunnelFuzzer(insn_buffer=bytearray([0x00]), end_first_byte=b"\xFF")
+    new = tun.split_remaining()
+    assert new is not None
+    roundtripped = pickle.loads(pickle.dumps(new))
+    assert roundtripped.insn_buffer[0] == new.insn_buffer[0]
+
+
+@pytest.mark.usefixtures("_reset_prefix_settings")
+def test_remaining_range_size():
+    tun = TunnelFuzzer(insn_buffer=bytearray([0x40]), end_first_byte=b"\x80")
+    assert tun.remaining_range_size() == 0x40
+
+
+@pytest.mark.usefixtures("_reset_prefix_settings")
+def test_remaining_range_size_zero():
+    tun = TunnelFuzzer(insn_buffer=bytearray([0x80]), end_first_byte=b"\x80")
+    assert tun.remaining_range_size() == 0
+
+
+@pytest.mark.usefixtures("_reset_prefix_settings")
+def test_split_updates_completion_tracker():
+    tun = TunnelFuzzer(insn_buffer=bytearray([0x00]), end_first_byte=b"\xFF")
+    old_end = tun.byterange_completion.range_end
+    tun.split_remaining()
+    # ByteRangeCompletion should have been recalculated with new (smaller) range
+    assert tun.byterange_completion.range_end != old_end
+
+
+@pytest.mark.usefixtures("_reset_prefix_settings")
+def test_splittable_protocol():
+    from vmsifter.fuzzer.types import Splittable
+
+    tun = TunnelFuzzer(insn_buffer=bytearray([0x00]), end_first_byte=b"\xFF")
+    assert isinstance(tun, Splittable)
+
+
+@pytest.mark.usefixtures("_reset_prefix_settings")
+def test_split_remaining_consecutive_splits():
+    """Multiple splits should keep shrinking the range."""
+    tun = TunnelFuzzer(insn_buffer=bytearray([0x00]), end_first_byte=b"\xFF")
+    split1 = tun.split_remaining()
+    assert split1 is not None
+    # tun is now [0x00, 0x7F], split1 is [0x7F, 0xFF]
+    split2 = tun.split_remaining()
+    assert split2 is not None
+    # tun is now [0x00, 0x3F], split2 is [0x3F, 0x7F]
+    assert tun.end_first_byte_int == 0x3F
+    assert split2.insn_buffer[0] == 0x3F
 
 
 @pytest.mark.skip(reason="infinite recursion since prefix added")
@@ -223,37 +316,30 @@ def test_bump_10_insn():
     # act
     # init with 2 exec similar behavior
     gen.send(None)
-    msg = InjectorResultMessage()
-    msg.reason = 48
-    msg.qualification = 0x7AB
-    # msg.qualification = 0x783
-    msg.insn_length = 7
-    msg.rip = 0x1FF9
-    exec_res = FuzzerExecResult.factory_from_injector_message(msg)
-    insn = gen.send(exec_res)
+    view = _make_view(reason=48, qualification=0x7AB, insn_length=7)
+    insn = gen.send(view)
     assert list(insn) == [0x00, 0x04, 0x05, 0x00, 0x00, 0x00, 0x01]
-    msg.qualification = 0x783
-    exec_res = FuzzerExecResult.factory_from_injector_message(msg)
-    insn = gen.send(exec_res)
+    view2 = _make_view(reason=48, qualification=0x783, insn_length=7)
+    insn = gen.send(view2)
     # now counter has started for 10 insn
     assert tun.counter == 1
     assert list(insn) == [0x00, 0x04, 0x05, 0x00, 0x00, 0x00, 0x02]
     last_byte = 0x2
     for _ in range(8):
-        insn = gen.send(exec_res)
+        insn = gen.send(view2)
         last_byte += 1
         assert list(insn) == [0x00, 0x04, 0x05, 0x00, 0x00, 0x00, last_byte]
 
     # check first insn with bump
-    first_insn_bump = list(gen.send(exec_res))
+    first_insn_bump = list(gen.send(view2))
     # continue for 9 insn
     last_byte = 0x10
     for _ in range(9):
-        insn = gen.send(exec_res)
+        insn = gen.send(view2)
         last_byte += 0x10
         assert list(insn) == [0x00, 0x04, 0x05, 0x00, 0x00, 0x00, last_byte]
     # check last insn is final marker 0xFF
-    final_insn_bump = list(gen.send(exec_res))
+    final_insn_bump = list(gen.send(view2))
     # assert
     assert list(first_insn_bump) == [0x00, 0x04, 0x05, 0x00, 0x00, 0x00, 0x10]
     assert list(final_insn_bump) == [0x00, 0x04, 0x05, 0x00, 0x00, 0x01]

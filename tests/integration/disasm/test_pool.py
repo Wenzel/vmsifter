@@ -10,7 +10,25 @@ from vmsifter.disasm.capstone import CapstoneDisasmAdaptee
 from vmsifter.disasm.interface import DisasmEngineType, DisasmResult
 from vmsifter.disasm.pool import DisasmPoolExecutor
 from vmsifter.disasm.yaxpeax import YaxpeaxDisasmAdaptee
-from vmsifter.fuzzer.tunnel import FuzzerExecResult, TunnelFuzzer
+from vmsifter.fuzzer.tunnel import TunnelFuzzer
+from vmsifter.fuzzer.types import ResultView
+from vmsifter.injector.types import EPTQualEnum, ExitReasonEnum, InjectorResultMessage
+
+
+def _ept_execute_view() -> ResultView:
+    buf = bytearray(InjectorResultMessage.size())
+    msg = InjectorResultMessage.from_buffer(buf)
+    msg.reason = ExitReasonEnum.EPT.value
+    msg.qualification = EPTQualEnum.EXECUTE.value
+    return ResultView(msg)
+
+
+def _valid_view(insn_length: int) -> ResultView:
+    buf = bytearray(InjectorResultMessage.size())
+    msg = InjectorResultMessage.from_buffer(buf)
+    msg.reason = ExitReasonEnum.MTF.value
+    msg.insn_length = insn_length
+    return ResultView(msg)
 
 
 def test_pool_disasm_one():
@@ -52,6 +70,6 @@ def test_capstone_tunnel(max_count: int):
             pool.submit_disasm(next_buff.tobytes())
             pool_res = next(pool.as_completed())
             if pool_res.disas_res is None:
-                result = FuzzerExecResult(pagefault=True)
+                result = _ept_execute_view()
             else:
-                result = FuzzerExecResult(length=pool_res.disas_res.size)
+                result = _valid_view(pool_res.disas_res.size)

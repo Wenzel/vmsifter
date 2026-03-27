@@ -14,7 +14,7 @@ from attrs import define
 from keystone import KS_ARCH_X86, KS_MODE_64, Ks, KsError
 
 from vmsifter.config import settings
-from vmsifter.fuzzer.types import AbstractInsnGenerator, FinalLogResult, FuzzerExecResult, Interrupted
+from vmsifter.fuzzer.types import AbstractInsnGenerator, FinalLogResult, ResultView
 
 
 @define(slots=False, auto_attribs=True, auto_detect=True)
@@ -199,10 +199,10 @@ class DrizzlerFuzzer(AbstractInsnGenerator):
             self.current_test_set += 1
             self.current_test = 0
 
-    def gen(self) -> Generator[memoryview, FuzzerExecResult, None]:
+    def gen(self) -> Generator[memoryview, ResultView, None]:
         while True:
-            result: FuzzerExecResult = yield self.current_insn
-            if isinstance(result, Interrupted):
+            view: ResultView = yield self.current_insn
+            if view.is_interrupted:
                 continue
 
             # Log results of previous execution
@@ -213,8 +213,9 @@ class DrizzlerFuzzer(AbstractInsnGenerator):
             _misc += f".{self.injection_type}"
             _misc += f" assembler_count:{self.count}"
 
-            result.final = FinalLogResult(
-                exec_res=result, insn=self.current_insn.hex(), len=self.insn_length, misc=_misc
+            snapshot = view.snapshot()
+            view.final = FinalLogResult(
+                snapshot=snapshot, insn=self.current_insn.hex(), len=self.insn_length, misc=_misc
             )
 
             try:
@@ -448,27 +449,6 @@ class X86Spec(object):
         return self.divlabel
 
     def prepare(self, instr):
-        # prep is for what may need to be put before the instruction.
-        # post is for what may need to be put after the instruction.
-
-        # if "div" in instr:
-        # if instr is a div, it needs a hack to recover from FPExceptions.
-        # - When returning, the signal handler used to catch SIGFPE will
-        # return to the same instruction, causing the fault again and then
-        # being trapped in doom and dread forever.
-        # - To prevent this, we save the address of the next instruction
-        # in RBP (that is not currently used by the fuzzer) prior to
-        # running the div.
-        # - If there is an FPE, the handler gets the address of the next
-        # instruction from RBP and returns to it.
-        # - See templates/basic.f for handler implementation.
-        # TODO: This is cute hack. Find a better way to deal with this.
-
-        #    if "div" in instr:
-        #        label = "divlabel_" + str(self.divlabel)
-        # instr = "mov rbp, " + label + "; " + instr + label + ":; "
-        #        instr = f"{instr}{label}:; "
-        #        self.divlabel = self.divlabel + 1
         return instr
 
 
@@ -526,10 +506,6 @@ class Operand(object):
     def setImmAll(self):
         self.setImm(1, 1, 1, 1)
 
-    # Contrary to Intel's documentation, Drizzle's RM/b only generates memory
-    # address dereference through ptr registers, not through immediate memory
-    # address, as a way to provide more control for when creating custom fuzzing
-    # test-cases. For immediate memory address operand use setMem.
     def setRm(self, rm8, rm16, rm32, rm64):
         self.rm8 = rm8
         self.rm16 = rm16
@@ -1101,11 +1077,6 @@ class Driver(object):
                 test = t.prepare(random) + test
             self.injectPool.append(test)
 
-        # injecting prefixed instructions in the middle of the tests will
-        # cause a lot of crashes and is likely to obfuscate results. It is
-        # also very hard to debug the tool in these circumstances. Because
-        # of that, we use the following flag to enable/disable injection
-        # of prefixed tested instruction in the middle of the tests.
         if self.conservativeTesting:
             return
 
@@ -1205,8 +1176,6 @@ class Driver(object):
         serialized = ""
         for line in instr.split("; "):
             if len(line) > 0:
-                # we don't want to separate instruction from prefixes, thus
-                # skip adding the serialized if this is a raw byte (prefix).
                 if line.startswith("db 0x"):
                     serialized = f"{serialized}{line}; "
                 else:

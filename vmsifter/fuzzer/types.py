@@ -3,240 +3,259 @@
 
 import logging
 from abc import ABC, abstractmethod
-from functools import lru_cache
-from typing import Any, Dict, Generator, List, Optional, Tuple, Type, Union
+from typing import Any, Generator, List, Optional, Protocol, Tuple, Union, runtime_checkable
 
 from attr import define, evolve, field
 
 from vmsifter.config import settings
-from vmsifter.injector import (
-    NUMBER_OF_REGISTERS,
-    EPTQual,
-    ExitReasonEnum,
-    InjInterruptEnum,
-    InjInterruptTypeEnum,
-    PageFaultEC,
-    RegistersEnum,
-)
+from vmsifter.injector import NUMBER_OF_REGISTERS, ExitReasonEnum, InjInterruptEnum, InjInterruptTypeEnum, RegistersEnum
 from vmsifter.injector.types import InjectorResultMessage
 from vmsifter.utils import fact_logging
 
 REGISTER_CANARY = 0x1100
-# build set(dict[RegisterEnum.RAX: 0x1101, ...])
-SET_REG_DELTA_REF = set(
-    {
-        RegistersEnum(index): val
-        for index, val in enumerate(range(REGISTER_CANARY, REGISTER_CANARY + NUMBER_OF_REGISTERS))
-        if index not in [RegistersEnum.CR2.value, RegistersEnum.RIP.value]
-    }.items()
-)
+
+# ── Module-level constants: raw ints, no Enum overhead in hot path ──
+
+_NMI_REASON = ExitReasonEnum.NMI.value  # 0
+_EXT_INT_REASON = ExitReasonEnum.EXTERNAL_INTERRUPT.value  # 1
+_EPT_REASON = ExitReasonEnum.EPT.value  # 48
+_EPT_X_BIT = 0x4
+_INTR_VALID = 0x80000000
+_INTR_TYPE_SHIFT = 8
+_INTR_TYPE_MASK = 0x7
+_HW_EXC_TYPE = InjInterruptTypeEnum.HW_EXC.value  # 3
+_INVALID_OPCODE_VEC = InjInterruptEnum.INVALID_OPCODE.value  # 6
+
+# ── Module-level lookup tables for cold path (ResultSnapshot) ──
+
+_REGS_ENUM_TABLE: list = [RegistersEnum(i) for i in range(NUMBER_OF_REGISTERS)]
+_CR2_VALUE: int = RegistersEnum.CR2.value
+_RIP_VALUE: int = RegistersEnum.RIP.value
+_EXIT_REASON_MAP: dict = {er.value: er for er in ExitReasonEnum}
+_INTR_TYPE_ENUM_MAP: dict = {e.value: e for e in InjInterruptTypeEnum}
+_INTR_ENUM_MAP: dict = {e.value: e for e in InjInterruptEnum}
 
 
-@define(init=False)
-class FuzzerExecResult:
-    rep_length: Optional[int] = field(eq=False)
-    """Length reported by the CPU on VMEXIT"""
+# ══════════════════════════════════════════════════════════════════════
+# Tier 1: ResultView — mutable, zero-allocation, reused every iteration
+# ══════════════════════════════════════════════════════════════════════
+
+
+@define(slots=True)
+class ResultView:
+    """Mutable view over the shared ctypes recv buffer.
+
+    One instance exists for the entire loop lifetime.
+    Properties read directly from the ctypes struct fields --
+    no copying, no object creation.
+    """
+
+    _msg: InjectorResultMessage
+    _fingerprint: Optional[tuple] = field(init=False, default=None)
+    # Mutable slot for the fuzzer to attach a FinalLogResult when ready
+    final: Optional["FinalLogResult"] = field(init=False, default=None)
+
+    def invalidate(self):
+        """Call after recv_into. Clears cached derivations."""
+        self._fingerprint = None
+        self.final = None
+
+    # ── Hot path: classification (direct int comparisons) ──
+
+    @property
+    def is_interrupted(self) -> bool:
+        return self._msg.reason == _EXT_INT_REASON
+
+    @property
+    def is_ept_execute(self) -> bool:
+        return self._msg.reason == _EPT_REASON and bool(self._msg.qualification & _EPT_X_BIT)
+
+    @property
+    def is_nmi(self) -> bool:
+        return self._msg.reason == _NMI_REASON
+
+    @property
+    def reason(self) -> int:
+        return self._msg.reason
+
+    @property
+    def rep_length(self) -> Optional[int]:
+        v = self._msg.insn_length
+        return v if v != 0 else None
+
+    @property
+    def is_invalid_opcode(self) -> bool:
+        m = self._msg
+        if m.reason != _NMI_REASON:
+            return False
+        info = m.intr_info
+        return (
+            bool(info & _INTR_VALID)
+            and (info >> _INTR_TYPE_SHIFT) & _INTR_TYPE_MASK == _HW_EXC_TYPE
+            and info & 0xFF == _INVALID_OPCODE_VEC
+        )
+
+    # ── Hot path: equality fingerprint (cached tuple of 2-3 ints) ──
+
+    @property
+    def fingerprint(self) -> tuple:
+        """Captures exactly the fields that the old attrs __eq__ compared.
+        Computed at most once per recv. Cheap tuple of raw ints."""
+        if self._fingerprint is None:
+            m = self._msg
+            r = m.reason
+            if r == _NMI_REASON:
+                info = m.intr_info
+                if info & _INTR_VALID:
+                    itype = (info >> _INTR_TYPE_SHIFT) & _INTR_TYPE_MASK
+                else:
+                    itype = -1
+                self._fingerprint = (r, itype)
+            elif r == _EPT_REASON:
+                self._fingerprint = (r, m.qualification & 0x7)
+            else:
+                self._fingerprint = (r,)
+        return self._fingerprint
+
+    # ── Cold path: snapshot for logging (object creation only here) ──
+
+    def snapshot(self) -> "ResultSnapshot":
+        """Freeze current buffer state into an immutable object for CSV logging.
+        Called ONLY when a result becomes 'final'. This is the ONLY place
+        that creates Python objects from the buffer."""
+        return ResultSnapshot.from_msg(self._msg)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Tier 2: ResultSnapshot — immutable, created only at log time
+# ══════════════════════════════════════════════════════════════════════
+
+
+@define(slots=True)
+class ResultSnapshot:
+    """Immutable parsed result. Created only for results that will be logged."""
+
+    reason: int
     exit_reason: ExitReasonEnum
-    perfct: List[int] = field(eq=False)
-    regs: Dict[RegistersEnum, int] = field(eq=False)
-    # can be a reference to self or the self.last_complete_type from the Tunnel
-    final: Optional["FinalLogResult"] = field(eq=False)
-    """Attribute set by the fuzzer when the current insn is a 'final' insn that can be logged into the CSV writer"""
-    # extra info from VMExit
-    insn_info: Optional[int] = field(eq=False)
-    gla: Optional[int] = field(eq=False)
-    intr_info: Optional[int] = field(eq=False)
-    intr_error: Optional[int] = field(eq=False)
-    vec_info: Optional[int] = field(eq=False)
-    vec_error: Optional[int] = field(eq=False)
+    qualification: int
+    insn_length: int
+    perfct: Tuple[int, ...] = field()
+    raw_regs: Tuple[int, ...] = field()
+    intr_info: int
+    intr_error: int
+    vec_info: int
+    vec_error: int
+    insn_info: int
+    gla: int
+    stack_value: int
 
-    @abstractmethod
+    @classmethod
+    def from_msg(cls, msg: InjectorResultMessage) -> "ResultSnapshot":
+        reason = msg.reason
+        return cls(
+            reason=reason,
+            exit_reason=_EXIT_REASON_MAP.get(reason, ExitReasonEnum.UNKNOWN),
+            qualification=msg.qualification,
+            insn_length=msg.insn_length,
+            perfct=tuple(msg.perfct),
+            raw_regs=tuple(msg.regs),
+            intr_info=msg.intr_info,
+            intr_error=msg.intr_error,
+            vec_info=msg.vec_info,
+            vec_error=msg.vec_error,
+            insn_info=msg.insn_info,
+            gla=msg.gla,
+            stack_value=msg.stack_value,
+        )
+
+    # ── String formatting methods (only called during CSV write) ──
+
     def type_str(self) -> str:
-        """return a string representation of the FuzzerExecResult type for CSV logging"""
-        pass
+        r = self.reason
+        if r == _NMI_REASON:
+            return self._nmi_type_str()
+        elif r == _EPT_REASON:
+            q = self.qualification
+            rwx = f"{'r' if q & 1 else ''}{'w' if q & 2 else ''}{'x' if q & 4 else ''}"
+            return f"vmexit:{r} ept:{rwx}"
+        elif r == _EXT_INT_REASON:
+            return "interrupted"
+        else:
+            return f"vmexit:{r}"
 
-    def misc_str(self) -> str:
-        """return a string representation of the misc field for CSV logging"""
-        s = f"cpu_len:{self.rep_length}"
-        if self.insn_info and self.insn_info != 0:
-            s += " insn_info:" + str(self.insn_info)
-        if self.vec_info and self.vec_info != 0:
-            s += " vec_info:" + str(self.vec_info)
-        if self.vec_error and self.vec_error != 0:
-            s += " vec_error:" + str(self.vec_error)
+    def _nmi_type_str(self) -> str:
+        s = f"vmexit:{self.reason}"
+        info = self.intr_info
+        if not (info & _INTR_VALID):
+            return s
+        itype = (info >> _INTR_TYPE_SHIFT) & _INTR_TYPE_MASK
+        itype_enum = _INTR_TYPE_ENUM_MAP.get(itype, InjInterruptTypeEnum.INVALID)
+        s += f" interrupt_type:{itype_enum.name.lower()}"
+        vector = info & 0xFF
+        if itype_enum == InjInterruptTypeEnum.EXTERNAL:
+            s += f" external_vector:{hex(vector)}"
+        else:
+            intr_enum = _INTR_ENUM_MAP.get(vector)
+            if intr_enum is not None:
+                s += f" interrupt_vector:{intr_enum.name.lower()}"
+                if intr_enum == InjInterruptEnum.PAGE_FAULT and info & 0x800:
+                    ec = self.intr_error
+                    pf = f"{'w' if ec & 2 else 'r'}{'x' if ec & 0x10 else ''}"
+                    pf += f"{'p' if ec & 1 else ''}{'RSVD' if ec & 8 else ''}"
+                    s += f":{pf}"
         return s
 
     def reg_delta_str(self) -> str:
-        """return a string representation of the register deltas for CSV logging"""
-        diff = set(self.regs.items()) - SET_REG_DELTA_REF
-        return " ".join([f"{reg.name.lower()}:{hex(value)}" for reg, value in dict(diff).items()])
-
-    @classmethod
-    def factory_from_injector_message(cls, msg: InjectorResultMessage):
-        # exit_reason
-        exit_reason = cls.exit_reason_enum(msg.reason)
-        # define Map when all types are defined
-        MAP_EXITREASON_TUNNELEXECRESULT: Dict[ExitReasonEnum, Type[FuzzerExecResult]] = {
-            ExitReasonEnum.NMI: NMI,
-            ExitReasonEnum.EXTERNAL_INTERRUPT: Interrupted,
-            ExitReasonEnum.EPT: EPT,
-        }
-
-        try:
-            subcls = MAP_EXITREASON_TUNNELEXECRESULT[exit_reason]
-        except KeyError:
-            subcls = Other
-
-        return subcls.from_injector_message(msg)
-
-    @classmethod
-    def from_injector_message(cls, msg):
-        instance = cls()
-        instance.exit_reason = cls.exit_reason_enum(msg.reason)
-        instance.rep_length = msg.insn_length
-        instance.perfct = [x for x in msg.perfct]
-        # skip cr2 at the end of the list, gets saved in misc column for pagefault
-        instance.regs = {
-            RegistersEnum(index): value for index, value in enumerate(msg.regs) if index != RegistersEnum.CR2.value
-        }
-        instance.final = None
-        instance.insn_info = msg.insn_info
-        instance.gla = msg.gla
-        instance.intr_info = msg.intr_info
-        instance.intr_error = msg.intr_error
-        instance.vec_info = msg.vec_info
-        instance.vec_error = msg.vec_error
-        return instance
-
-    @staticmethod
-    @lru_cache(1)
-    def exit_reason_enum(reason):
-        try:
-            return ExitReasonEnum(reason)
-        except ValueError:
-            return ExitReasonEnum.UNKNOWN
-
-
-@define(init=False)
-class Interrupted(FuzzerExecResult):
-
-    def type_str(self) -> str:
-        return "interrupted"
-
-
-@define(init=False)
-class NMI(FuzzerExecResult):  # type: ignore[override]
-    reason: int
-    interrupt_type: InjInterruptTypeEnum
-    interrupt: Optional[InjInterruptEnum] = field(eq=False, default=None)
-    cr2: Optional[int] = field(eq=False, default=None)
-    stack_value: Optional[int] = field(eq=False, default=None)
-    nmi_unblocking_due_to_iret: Optional[int] = field(eq=False, default=None)
-    external_vector: Optional[int] = field(eq=False, default=None)
-    pagefaultec: Optional[PageFaultEC] = field(eq=False, default=None)
-
-    @classmethod
-    def from_injector_message(cls, msg):
-        instance = super().from_injector_message(msg)
-        instance.reason = msg.reason
-        instance.interrupt = None
-
-        if msg.intr_info & 0x80000000 == 0:
-            instance.interrupt_type = InjInterruptTypeEnum(-1)
-            return instance
-
-        instance.interrupt_type = InjInterruptTypeEnum((msg.intr_info >> 8) & 7)
-        vector = msg.intr_info & 0xFF
-
-        instance.interrupt = InjInterruptEnum(vector)
-
-        instance.external_vector = None
-        if instance.interrupt_type == InjInterruptTypeEnum.EXTERNAL:
-            instance.external_vector = vector
-            return instance
-
-        instance.pagefaultec = None
-        if msg.intr_info & 0x800:
-            if instance.interrupt != InjInterruptEnum.PAGE_FAULT:
-                instance.stack_value = msg.intr_error
-            else:
-                instance.cr2 = msg.qualification
-                instance.pagefaultec = PageFaultEC(msg.intr_error)
-
-        if not (
-            instance.interrupt_type == InjInterruptTypeEnum.HW_EXC
-            and instance.interrupt == InjInterruptEnum.DOUBLE_FAULT
-        ):
-            instance.nmi_unblocking_due_to_iret = msg.intr_info >> 12 & 1
-
-        instance.cr2 = msg.regs[RegistersEnum.CR2.value]
-        instance.stack_value = msg.stack_value
-
-        return instance
-
-    def type_str(self) -> str:
-        s = f"vmexit:{self.reason}"
-        if hasattr(self, "interrupt_type") and self.interrupt_type is not None:
-            s += f" interrupt_type:{self.interrupt_type.name.lower()}"
-            if self.interrupt_type == InjInterruptTypeEnum.EXTERNAL and self.external_vector is not None:
-                s += f" external_vector:{hex(self.external_vector)}"
-            elif self.interrupt is not None:
-                s += f" interrupt_vector:{self.interrupt.name.lower()}"
-                if self.interrupt == InjInterruptEnum.PAGE_FAULT and self.pagefaultec is not None:
-                    s += f":{self.pagefaultec}"
-        return s
+        parts = []
+        for index, value in enumerate(self.raw_regs):
+            if index == _CR2_VALUE or index == _RIP_VALUE:
+                continue
+            if value != REGISTER_CANARY + index:
+                parts.append(f"{_REGS_ENUM_TABLE[index].name.lower()}:{hex(value)}")
+        return " ".join(parts)
 
     def misc_str(self) -> str:
-        s = ""
-        if (
-            hasattr(self, "stack_value")
-            and self.stack_value is not None
-            and self.interrupt != InjInterruptEnum.PAGE_FAULT
-        ):
-            s += f" stack:{hex(self.stack_value)}"
-        if hasattr(self, "cr2") and self.cr2 is not None:
-            s += f" cr2:{hex(self.cr2)}"
-        if hasattr(self, "nmi_unblocking_due_to_iret") and self.nmi_unblocking_due_to_iret == 1:
-            s += " nmi_unblocking_due_to_iret"
-        return super().misc_str() + s
-
-
-@define(init=False)
-class EPT(FuzzerExecResult):  # type: ignore[override]
-    eptqual: EPTQual
-    reason: int
-
-    @classmethod
-    def from_injector_message(cls, msg):
-        instance = super().from_injector_message(msg)
-        instance.eptqual = EPTQual(msg.qualification)
-        instance.reason = msg.reason
-        return instance
-
-    def type_str(self) -> str:
-        s = f"vmexit:{self.reason} ept:{self.eptqual}"
+        rep = self.insn_length if self.insn_length != 0 else None
+        s = f"cpu_len:{rep}"
+        if self.insn_info and self.insn_info != 0:
+            s += f" insn_info:{self.insn_info}"
+        if self.vec_info and self.vec_info != 0:
+            s += f" vec_info:{self.vec_info}"
+        if self.vec_error and self.vec_error != 0:
+            s += f" vec_error:{self.vec_error}"
+        # NMI-specific fields
+        if self.reason == _NMI_REASON:
+            info = self.intr_info
+            if info & _INTR_VALID:
+                vector = info & 0xFF
+                if vector != InjInterruptEnum.PAGE_FAULT.value and self.stack_value:
+                    s += f" stack:{hex(self.stack_value)}"
+                cr2 = self.raw_regs[_CR2_VALUE]
+                if cr2:
+                    s += f" cr2:{hex(cr2)}"
+                if (info >> 12) & 1:
+                    s += " nmi_unblocking_due_to_iret"
+        # EPT-specific fields
+        elif self.reason == _EPT_REASON:
+            if self.qualification & 0x80 and self.gla:
+                s += f" gla:{hex(self.gla)}"
         return s
 
-    def misc_str(self) -> str:
-        s = ""
-        if self.eptqual.gla_valid and self.gla:
-            s += " gla:" + str(hex(self.gla))
-        return super().misc_str() + s
+    @property
+    def is_invalid_opcode(self) -> bool:
+        if self.reason != _NMI_REASON:
+            return False
+        info = self.intr_info
+        return (
+            bool(info & _INTR_VALID)
+            and (info >> _INTR_TYPE_SHIFT) & _INTR_TYPE_MASK == _HW_EXC_TYPE
+            and info & 0xFF == _INVALID_OPCODE_VEC
+        )
 
 
-@define(init=False)
-class Other(FuzzerExecResult):  # type: ignore[override]
-    reason: int
-
-    @classmethod
-    def from_injector_message(cls, msg):
-        instance = super().from_injector_message(msg)
-        instance.reason = msg.reason
-        return instance
-
-    def type_str(self) -> str:
-        s = f"vmexit:{self.reason}"
-        return s
+# ══════════════════════════════════════════════════════════════════════
+# AbstractInsnGenerator and FinalLogResult
+# ══════════════════════════════════════════════════════════════════════
 
 
 @define(slots=True, auto_attribs=True, auto_detect=True)
@@ -307,8 +326,8 @@ class AbstractInsnGenerator(ABC):
         return self.view[: self.insn_length]
 
     @abstractmethod
-    def gen(self) -> Generator[memoryview, FuzzerExecResult, None]:
-        """Generate the next instruction for the injector and receives a FuzzerExecResult upon execution"""
+    def gen(self) -> Generator[memoryview, ResultView, None]:
+        """Generate the next instruction for the injector and receives a ResultView upon execution"""
         pass
 
     def partition(self, nb_parts: int) -> Generator["AbstractInsnGenerator", None, None]:
@@ -334,7 +353,19 @@ class AbstractInsnGenerator(ABC):
 
 @define(slots=True)
 class FinalLogResult:
-    exec_res: FuzzerExecResult
+    snapshot: ResultSnapshot
     insn: str
     len: int
     misc: str = ""
+
+
+@runtime_checkable
+class Splittable(Protocol):
+    """Structural protocol for fuzzers that support dynamic mid-execution splitting.
+
+    Any class implementing these two methods satisfies the protocol -- no inheritance needed.
+    """
+
+    def split_remaining(self) -> Optional["AbstractInsnGenerator"]: ...  # noqa: E704
+
+    def remaining_range_size(self) -> int: ...  # noqa: E704

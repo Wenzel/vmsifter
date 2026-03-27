@@ -7,8 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from vmsifter.config import settings
-from vmsifter.fuzzer.types import NMI, FinalLogResult
-from vmsifter.injector.types import InjInterruptEnum
+from vmsifter.fuzzer.types import FinalLogResult
 from vmsifter.utils.protected_manager import ProtectedContextManager
 
 
@@ -53,16 +52,17 @@ class CSVOutput(ProtectedContextManager):
 
         self._logger.debug("Logging results for %s", final.insn)
 
-        if isinstance(final.exec_res, NMI) and final.exec_res.interrupt == InjInterruptEnum.INVALID_OPCODE:
+        snapshot = final.snapshot
+        if snapshot.is_invalid_opcode:
             # invalid insn
             self._invalid_writer.writerow(
                 [
                     final.insn,
                     final.len,
-                    final.exec_res.type_str(),
-                    final.exec_res.misc_str() + final.misc,
-                    *final.exec_res.perfct,
-                    final.exec_res.reg_delta_str(),
+                    snapshot.type_str(),
+                    snapshot.misc_str() + final.misc,
+                    *snapshot.perfct,
+                    snapshot.reg_delta_str(),
                 ]
             )
         else:
@@ -71,9 +71,9 @@ class CSVOutput(ProtectedContextManager):
                 [
                     final.insn,
                     final.len,
-                    final.exec_res.type_str(),
-                    final.exec_res.misc_str() + final.misc,
-                    *final.exec_res.perfct,
-                    final.exec_res.reg_delta_str(),
+                    snapshot.type_str(),
+                    snapshot.misc_str() + final.misc,
+                    *snapshot.perfct,
+                    snapshot.reg_delta_str(),
                 ]
             )
