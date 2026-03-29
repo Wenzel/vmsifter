@@ -187,7 +187,7 @@ def test_normalize_command_fails_when_campaign_has_no_matching_shards(tmp_path: 
     result = CliRunner().invoke(cli.main, ["normalize", str(tmp_path)])
 
     assert result.exit_code != 0
-    assert "No shard files matching" in result.output
+    assert "No shard files found" in result.output
 
 
 def test_normalize_command_refuses_existing_unified_outputs(tmp_path: Path):
@@ -204,3 +204,28 @@ def test_normalize_command_refuses_existing_unified_outputs(tmp_path: Path):
     assert "Refusing to overwrite existing normalized file" in result.output
     assert (tmp_path / "results_1.csv").exists()
     assert (tmp_path / "invalid_instructions_1.csv").exists()
+
+
+def test_normalize_command_merges_only_remaining_shard_family(tmp_path: Path):
+    (tmp_path / "results.csv").write_text("insn,length,exit-type\n90,1,vmexit\n", encoding="ascii")
+    (tmp_path / "invalid_instructions_1.csv").write_text(
+        "insn,length,exit-type\n0f3f,2,invalid-opcode\n",
+        encoding="ascii",
+    )
+    (tmp_path / "invalid_instructions_2.csv").write_text(
+        "insn,length,exit-type\n0f0b,2,invalid-opcode\n",
+        encoding="ascii",
+    )
+
+    result = CliRunner().invoke(cli.main, ["normalize", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert result.output == f"Normalized: {tmp_path / 'invalid_instructions.csv'}\n"
+    assert (tmp_path / "results.csv").read_text(encoding="ascii") == "insn,length,exit-type\n90,1,vmexit\n"
+    assert (tmp_path / "invalid_instructions.csv").read_text(encoding="ascii") == (
+        "insn,length,exit-type\n"
+        "0f3f,2,invalid-opcode\n"
+        "0f0b,2,invalid-opcode\n"
+    )
+    assert not (tmp_path / "invalid_instructions_1.csv").exists()
+    assert not (tmp_path / "invalid_instructions_2.csv").exists()

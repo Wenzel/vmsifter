@@ -94,8 +94,8 @@ def normalize(campaign_dir: Path) -> None:
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    click.echo(f"Normalized: {outputs['results']}")
-    click.echo(f"Normalized: {outputs['invalid_instructions']}")
+    for output_path in outputs.values():
+        click.echo(f"Normalized: {output_path}")
 
 
 @main.command("backends")
