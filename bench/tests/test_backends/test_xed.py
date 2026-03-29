@@ -41,6 +41,9 @@ def test_ud2(xed):
     result = xed.process(bytes.fromhex("0f0b"))
     assert result.valid is True
     assert result.length == 2
+    assert result.exit_type == "fault/UD"
+    assert result.misc is not None
+    assert result.misc["iclass"] == "UD2"
 
 
 def test_invalid_instruction(xed):

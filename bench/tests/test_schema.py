@@ -73,11 +73,11 @@ def test_reference_row_parses_and_exposes_xed_comparability():
 
     assert reference.insn == b"\x90"
     assert reference.length == 1
-    assert reference.expected_xed_validity() is True
+    assert reference.expected_xed_exit_type() == "valid"
     assert reference.is_xed_comparable() is True
 
 
-def test_reference_row_skips_invalid_opcode_for_xed():
+def test_reference_row_maps_invalid_opcode_to_fault_ud_for_xed():
     reference = ReferenceRow.from_csv_row({
         "insn": "0f0b",
         "length": "2",
@@ -86,8 +86,8 @@ def test_reference_row_skips_invalid_opcode_for_xed():
         "reg-delta": "",
     })
 
-    assert reference.expected_xed_validity() is None
-    assert reference.is_xed_comparable() is False
+    assert reference.expected_xed_exit_type() == "fault/UD"
+    assert reference.is_xed_comparable() is True
 
 
 def test_reference_row_reports_invalid_insn_hex():

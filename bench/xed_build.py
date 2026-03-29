@@ -31,6 +31,7 @@ ffi.cdef("""
     typedef int xed_operand_enum_t;
     typedef int xed_operand_action_enum_t;
     typedef int xed_reg_enum_t;
+    typedef int xed_iclass_enum_t;
 
     // Register operand slot constants
     #define XED_OPERAND_REG0 ...
@@ -51,13 +52,18 @@ ffi.cdef("""
 
     // Register constant
     #define XED_REG_INVALID ...
+    #define XED_ICLASS_UD0 ...
+    #define XED_ICLASS_UD1 ...
+    #define XED_ICLASS_UD2 ...
 
     void xed_tables_init(void);
     void xed_state_init2(xed_state_t*, xed_machine_mode_enum_t, xed_address_width_enum_t);
     void xed_decoded_inst_zero_set_mode(xed_decoded_inst_t*, const xed_state_t*);
     xed_error_enum_t xed_decode(xed_decoded_inst_t*, const uint8_t*, unsigned int);
     unsigned int xed_decoded_inst_get_length(const xed_decoded_inst_t*);
+    xed_iclass_enum_t xed_decoded_inst_get_iclass(const xed_decoded_inst_t*);
     const char* xed_error_enum_t2str(xed_error_enum_t);
+    const char* xed_iclass_enum_t2str(xed_iclass_enum_t);
     int xed_format_context(int, const xed_decoded_inst_t*, char*, int, uint64_t, void*, void*);
 
     // Operand introspection

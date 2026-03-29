@@ -22,19 +22,26 @@ class FakeBackend(Backend):
         return BackendResult(valid=True, length=len(insn_bytes), exit_type="valid")
 
     def validate(self, reference: ReferenceRow, result: BackendResult) -> ValidationReport:
-        if reference.is_xed_comparable():
-            if result.length != reference.length:
-                return ValidationReport(
-                    comparable=True,
-                    issues=(ValidationIssue(
-                        field="length",
-                        expected=reference.length,
-                        actual=result.length,
-                        message="length mismatch",
-                    ),),
-                )
-            return ValidationReport(comparable=True)
-        return ValidationReport.skip()
+        expected_exit_type = reference.expected_xed_exit_type()
+        if expected_exit_type is None:
+            return ValidationReport.skip()
+
+        issues: list[ValidationIssue] = []
+        if result.exit_type != expected_exit_type:
+            issues.append(ValidationIssue(
+                field="exit_type",
+                expected=expected_exit_type,
+                actual=result.exit_type,
+                message="exit_type mismatch",
+            ))
+        if result.length != reference.length:
+            issues.append(ValidationIssue(
+                field="length",
+                expected=reference.length,
+                actual=result.length,
+                message="length mismatch",
+            ))
+        return ValidationReport(comparable=True, issues=tuple(issues))
 
 
 def test_validate_counts_only_comparable_rows(tmp_path: Path):
@@ -43,7 +50,7 @@ def test_validate_counts_only_comparable_rows(tmp_path: Path):
         "\n".join([
             "insn,length,exit-type,misc,reg-delta",
             "90,1,vmexit:37,,",
-            "0f0b,2,vmexit:0 interrupt_type:hw_exc interrupt_vector:invalid_opcode,,",
+            "0f0b,2,interrupted,,",
         ]) + "\n",
         encoding="ascii",
     )
@@ -54,6 +61,24 @@ def test_validate_counts_only_comparable_rows(tmp_path: Path):
     assert summary.comparable_rows == 1
     assert summary.discrepant_rows == 0
     assert summary.issue_count == 0
+
+
+def test_validate_treats_invalid_opcode_rows_as_comparable(tmp_path: Path):
+    input_path = tmp_path / "catalog.csv"
+    input_path.write_text(
+        "\n".join([
+            "insn,length,exit-type,misc,reg-delta",
+            "0f0b,2,vmexit:0 interrupt_type:hw_exc interrupt_vector:invalid_opcode,,",
+        ]) + "\n",
+        encoding="ascii",
+    )
+
+    summary = validate(input_path, FakeBackend(exec_mode=64))
+
+    assert summary.total_rows == 1
+    assert summary.comparable_rows == 1
+    assert summary.discrepant_rows == 1
+    assert summary.issue_count == 1
 
 
 def test_validate_reports_discrepancies(tmp_path: Path):

@@ -33,6 +33,12 @@ _REG_SLOTS = frozenset({
     lib.XED_OPERAND_REG8,
 })
 
+_UD_ICLASSES = frozenset({
+    lib.XED_ICLASS_UD0,
+    lib.XED_ICLASS_UD1,
+    lib.XED_ICLASS_UD2,
+})
+
 
 @register
 class XedBackend(Backend):
@@ -65,6 +71,9 @@ class XedBackend(Backend):
             )
 
         length = lib.xed_decoded_inst_get_length(self._xedd)
+        iclass = lib.xed_decoded_inst_get_iclass(self._xedd)
+        iclass_name = ffi.string(lib.xed_iclass_enum_t2str(iclass)).decode()
+        exit_type = "fault/UD" if iclass in _UD_ICLASSES else "valid"
 
         # Format disassembly
         asm = None
@@ -75,28 +84,32 @@ class XedBackend(Backend):
 
         reg_delta = self._written_registers()
 
+        misc: dict[str, str] | None = {"iclass": iclass_name}
+        if asm:
+            misc["asm"] = asm
+
         return BackendResult(
             valid=True,
             length=length,
-            exit_type="valid",
+            exit_type=exit_type,
             reg_delta=reg_delta,
-            misc={"asm": asm} if asm else None,
+            misc=misc,
         )
 
     def validate(self, reference: ReferenceRow, result: BackendResult) -> ValidationReport:
-        expected_valid = reference.expected_xed_validity()
-        if expected_valid is None:
+        expected_exit_type = reference.expected_xed_exit_type()
+        if expected_exit_type is None:
             return ValidationReport.skip()
 
         issues: list[ValidationIssue] = []
-        if result.valid is not expected_valid:
+        if result.exit_type != expected_exit_type:
             issues.append(ValidationIssue(
-                field="valid",
-                expected=expected_valid,
-                actual=result.valid,
-                message="XED validity disagrees with the reference row",
+                field="exit_type",
+                expected=expected_exit_type,
+                actual=result.exit_type,
+                message="XED exit type disagrees with the reference row",
             ))
-        elif expected_valid and reference.length is not None and result.length != reference.length:
+        if reference.length is not None and result.length != reference.length:
             issues.append(ValidationIssue(
                 field="length",
                 expected=reference.length,

@@ -116,15 +116,21 @@ class ReferenceRow:
             parsed_exit_type=parse_exit_type(exit_type),
         )
 
-    def expected_xed_validity(self) -> bool | None:
-        """Return the expected XED validity when the reference row is comparable."""
+    def expected_xed_exit_type(self) -> str | None:
+        """Return the expected XED exit type when the reference row is comparable."""
         if self.parsed_exit_type.kind == "vmexit" and self.parsed_exit_type.vmexit_reason == 37:
-            return True
+            return "valid"
+        if (
+            self.parsed_exit_type.kind == "vmexit"
+            and self.parsed_exit_type.interrupt_type == "hw_exc"
+            and self.parsed_exit_type.interrupt_vector == "invalid_opcode"
+        ):
+            return "fault/UD"
         return None
 
     def is_xed_comparable(self) -> bool:
         """Return whether the row is comparable against XED in the current model."""
-        return self.expected_xed_validity() is not None
+        return self.expected_xed_exit_type() is not None
 
 
 @dataclass(frozen=True)
