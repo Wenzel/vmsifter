@@ -8,6 +8,7 @@ import click
 
 from bench.diff import diff as run_diff
 from bench.docker_runtime import list_backends, run_backend_in_docker, validate_backend_in_docker
+from bench.normalize import normalize_campaign_dir
 
 
 @click.group()
@@ -82,6 +83,19 @@ def diff(left: Path, right: Path, columns: str, output_path: Path | None) -> Non
     compare_cols = [c.strip() for c in columns.split(",")]
     count = run_diff(left, right, output_path, compare_cols)
     click.echo(f"{count} differing row(s)", err=True)
+
+
+@main.command()
+@click.argument("campaign_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
+def normalize(campaign_dir: Path) -> None:
+    """Merge sharded campaign CSVs into unified files."""
+    try:
+        outputs = normalize_campaign_dir(campaign_dir)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(f"Normalized: {outputs['results']}")
+    click.echo(f"Normalized: {outputs['invalid_instructions']}")
 
 
 @main.command("backends")
