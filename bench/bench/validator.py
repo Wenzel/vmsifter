@@ -16,7 +16,6 @@ from bench.schema import (
     Backend,
     BackendResult,
     InvalidInstructionHexError,
-    ParsedExitType,
     ReferenceRow,
     ValidationReport,
 )
@@ -44,7 +43,6 @@ class SerializableReferenceRow:
     length: int | None
     exit_type: str
     raw: dict[str, str]
-    parsed_exit_type: ParsedExitType
 
     @classmethod
     def from_reference(cls, reference: ReferenceRow) -> "SerializableReferenceRow":
@@ -53,7 +51,6 @@ class SerializableReferenceRow:
             length=reference.length,
             exit_type=reference.exit_type,
             raw=dict(reference.raw),
-            parsed_exit_type=reference.parsed_exit_type,
         )
 
 

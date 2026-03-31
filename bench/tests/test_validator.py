@@ -116,6 +116,7 @@ def test_validate_writes_failures_as_json_array(tmp_path: Path):
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert len(payload) == 1
     assert payload[0]["reference"]["insn"] == "0f1f00"
+    assert "parsed_exit_type" not in payload[0]["reference"]
     assert payload[0]["report"]["comparable"] is True
     assert payload[0]["report"]["issues"][0]["field"] == "length"
 
