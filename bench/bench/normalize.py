@@ -1,7 +1,7 @@
 """Helpers for normalizing sharded campaign CSV outputs."""
 
-import csv
 import re
+import shutil
 from pathlib import Path
 
 
@@ -44,23 +44,17 @@ def _find_shards(campaign_dir: Path, pattern: re.Pattern[str]) -> list[Path]:
 
 
 def _merge_shards(shard_paths: list[Path], output_path: Path) -> Path:
-    header: list[str] | None = None
+    wrote_header = False
     try:
         with output_path.open("w", newline="", encoding="ascii") as output_file:
-            writer = csv.writer(output_file)
             for shard_path in shard_paths:
                 with shard_path.open("r", newline="", encoding="ascii") as shard_file:
-                    reader = csv.reader(shard_file)
-                    shard_header = next(reader, None)
-                    if shard_header is not None:
-                        if header is None:
-                            header = shard_header
-                            writer.writerow(header)
-                        elif shard_header != header:
-                            raise ValueError(f"Header mismatch in {shard_path}")
-
-                        for row in reader:
-                            writer.writerow(row)
+                    shard_header = shard_file.readline()
+                    if shard_header:
+                        if not wrote_header:
+                            output_file.write(shard_header)
+                            wrote_header = True
+                        shutil.copyfileobj(shard_file, output_file)
 
                 output_file.flush()
                 shard_path.unlink()
@@ -69,7 +63,7 @@ def _merge_shards(shard_paths: list[Path], output_path: Path) -> Path:
             output_path.unlink()
         raise
 
-    if header is None:
+    if not wrote_header:
         if output_path.exists():
             output_path.unlink()
         raise ValueError(f"All shard files were empty for {output_path.name}")
