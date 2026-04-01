@@ -5,10 +5,43 @@ import sys
 from pathlib import Path
 
 import click
+from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    Progress,
+    ProgressColumn,
+    SpinnerColumn,
+    TaskID,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
 from bench.diff import diff as run_diff
 from bench.docker_runtime import list_backends, run_backend_in_docker, validate_backend_in_docker
 from bench.normalize import normalize_campaign_dir
+
+
+def _format_byte_count(value: int) -> str:
+    if value < 1000:
+        return f"{value}B"
+
+    suffixes = ("KB", "MB", "GB", "TB", "PB", "EB")
+    scaled = float(value)
+    for suffix in suffixes:
+        scaled /= 1000.0
+        if scaled < 1000.0:
+            return f"{scaled:.1f}{suffix}"
+
+    return f"{scaled:.1f}{suffix}"
+
+
+class CompactByteCountColumn(ProgressColumn):
+    def render(self, task) -> str:
+        total = task.total
+        if isinstance(total, (int, float)) and not isinstance(total, bool):
+            return f"{_format_byte_count(int(task.completed))}/{_format_byte_count(int(total))}"
+        return _format_byte_count(int(task.completed))
 
 
 @click.group()
@@ -89,10 +122,41 @@ def diff(left: Path, right: Path, columns: str, output_path: Path | None) -> Non
 @click.argument("campaign_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
 def normalize(campaign_dir: Path) -> None:
     """Merge sharded campaign CSVs into unified files."""
+    progress: Progress | None = None
+    task_ids: dict[str, TaskID] = {}
+    progress_callback = None
+
+    if sys.stderr.isatty():
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("{task.description}"),
+            BarColumn(),
+            CompactByteCountColumn(),
+            TimeElapsedColumn(),
+            TextColumn("eta"),
+            TimeRemainingColumn(compact=True, elapsed_when_finished=True),
+            transient=True,
+            console=Console(stderr=True),
+        )
+        progress.start()
+
+        def render_progress(name: str, current: int, total: int) -> None:
+            task_id = task_ids.get(name)
+            if task_id is None:
+                label = name.replace("_", " ")
+                task_id = progress.add_task(f"Normalizing {label}", total=total)
+                task_ids[name] = task_id
+            progress.update(task_id, completed=current, total=total)
+
+        progress_callback = render_progress
+
     try:
-        outputs = normalize_campaign_dir(campaign_dir)
+        outputs = normalize_campaign_dir(campaign_dir, progress_callback=progress_callback)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+    finally:
+        if progress is not None:
+            progress.stop()
 
     for output_path in outputs.values():
         click.echo(f"Normalized: {output_path}")
