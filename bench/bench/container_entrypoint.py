@@ -1,11 +1,22 @@
 """In-container entrypoint for running a single backend locally."""
 
 import argparse
+import logging
+import sys
 from pathlib import Path
 
 from bench.backends import get_backend
 from bench.runner import run as run_backend
 from bench.validator import VALIDATION_DISCREPANCY_EXIT_CODE, validate as validate_backend
+
+
+def _configure_logging() -> None:
+    """Emit validator and runner logs to container stderr."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(name)s %(levelname)s %(message)s",
+        stream=sys.stderr,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,6 +44,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    _configure_logging()
     args = parse_args()
     with get_backend(args.backend_name, exec_mode=args.exec_mode) as backend:
         if args.command == "run":
