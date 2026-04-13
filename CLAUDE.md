@@ -195,6 +195,27 @@ Settings are managed via `vmsifter/config/settings.toml` using Dynaconf. Key set
 - `deploy/`: Ansible deployment configuration
 - `tests/`: Unit tests (tunnel algorithm, partitioning) and benchmarks
 
+## vmsifter-bench (sub-project)
+
+`bench/` is a separate Poetry package (`vmsifter-bench`) that replays VMSifter's CSV instruction catalogs through userspace decoder/emulator backends (XED, Capstone, Unicorn) for differential comparison. It shares nothing with the main Python package except CSV file formats. See `DESIGN_VMSIFTER_BENCH.md` for full design rationale.
+
+```bash
+cd bench
+poetry install
+poetry run vmsifter-bench --help
+poetry run pytest                         # unit tests
+poetry run pytest -m docker_integration   # real Docker backend tests
+```
+
+CLI subcommands (`bench/bench/cli.py`):
+- `run`     — build backend container and run it on an input CSV catalog
+- `validate`— validate a CSV against a backend without writing results
+- `diff`    — compare two result CSVs on selected columns
+- `normalize` — merge sharded VMSifter campaign CSVs into unified files
+- `backends` — list available containerized backends
+
+Backends live in `bench/bench/backends/` (Python adapters) and `bench/containers/<name>/` (Dockerfiles). Each backend is invoked in its own container via `bench/bench/docker_runtime.py`.
+
 ## Important Notes
 
 - Requires custom Xen build with VM forking patches
