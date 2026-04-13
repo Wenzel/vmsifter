@@ -204,6 +204,25 @@ def test_validate_logs_invalid_insn_hex_with_row_context(tmp_path: Path, caplog)
     assert "insn='zz'" in caplog.text
 
 
+def test_validate_recovers_from_odd_length_hex(tmp_path: Path, caplog):
+    input_path = tmp_path / "catalog.csv"
+    input_path.write_text(
+        "\n".join([
+            "insn,length,exit-type,misc,reg-delta",
+            "cd900,2,vmexit:37,,",
+            "0f1f00,3,vmexit:37,,",
+        ]) + "\n",
+        encoding="ascii",
+    )
+
+    summary = validate(input_path, FakeBackend(exec_mode=64))
+
+    assert summary.skipped_rows == 1
+    assert summary.total_rows == 1
+    assert "Skipping odd-length instruction hex at CSV row 2" in caplog.text
+    assert "insn='cd900'" in caplog.text
+
+
 def test_validate_skips_embedded_header_rows(tmp_path: Path, caplog):
     input_path = tmp_path / "catalog.csv"
     input_path.write_text(

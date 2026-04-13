@@ -33,6 +33,7 @@ class ValidationSummary:
     comparable_rows: int
     discrepant_rows: int
     issue_count: int
+    skipped_rows: int = 0
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,7 @@ def validate(
     comparable_rows = 0
     discrepant_rows = 0
     issue_count = 0
+    skipped_rows = 0
     failures: list[ValidationFailure] = []
 
     with (
@@ -111,6 +113,15 @@ def validate(
             except InvalidInstructionHexError as exc:
                 if exc.insn_hex == "insn":
                     logger.warning("Skipping embedded CSV header at row %d", row_number)
+                    continue
+                if exc.reason == "odd_length":
+                    skipped_rows += 1
+                    logger.warning(
+                        "Skipping odd-length instruction hex at CSV row %d: insn=%r length=%r",
+                        row_number,
+                        exc.insn_hex,
+                        row.get("length", ""),
+                    )
                     continue
                 _log_invalid_input_row(
                     row_number,
@@ -155,13 +166,15 @@ def validate(
         comparable_rows=comparable_rows,
         discrepant_rows=discrepant_rows,
         issue_count=issue_count,
+        skipped_rows=skipped_rows,
     )
     logger.info(
-        "Validated %d row(s), comparable=%d, discrepant=%d, issues=%d",
+        "Validated %d row(s), comparable=%d, discrepant=%d, issues=%d, skipped=%d",
         summary.total_rows,
         summary.comparable_rows,
         summary.discrepant_rows,
         summary.issue_count,
+        summary.skipped_rows,
     )
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)

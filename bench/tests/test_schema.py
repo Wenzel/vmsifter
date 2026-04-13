@@ -102,3 +102,18 @@ def test_reference_row_reports_invalid_insn_hex():
 
     assert exc_info.value.insn_hex == "zz"
     assert dict(exc_info.value.raw_row)["insn"] == "zz"
+    assert exc_info.value.reason == "non_hex"
+
+
+def test_reference_row_reports_odd_length_hex_separately():
+    with pytest.raises(InvalidInstructionHexError) as exc_info:
+        ReferenceRow.from_csv_row({
+            "insn": "cd900",
+            "length": "2",
+            "exit-type": "vmexit:37",
+            "misc": "",
+            "reg-delta": "",
+        })
+
+    assert exc_info.value.insn_hex == "cd900"
+    assert exc_info.value.reason == "odd_length"

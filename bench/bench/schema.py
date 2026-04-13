@@ -36,9 +36,10 @@ class InvalidInstructionHexError(ValueError):
 
     insn_hex: str
     raw_row: Mapping[str, str]
+    reason: str = "non_hex"
 
     def __str__(self) -> str:
-        return f"invalid instruction hex {self.insn_hex!r}"
+        return f"invalid instruction hex {self.insn_hex!r} ({self.reason})"
 
 
 def parse_exit_type(value: str) -> ParsedExitType:
@@ -86,13 +87,22 @@ def _parse_optional_int(value: str | None) -> int | None:
     return int(value, 10)
 
 
+_HEX_CHARS = frozenset("0123456789abcdefABCDEF")
+
+
 def parse_instruction_hex(row: Mapping[str, str]) -> bytes:
     """Parse the ``insn`` column and raise a structured error when malformed."""
     insn_hex = row.get("insn", "").strip()
     try:
         return bytes.fromhex(insn_hex)
     except ValueError as exc:
-        raise InvalidInstructionHexError(insn_hex=insn_hex, raw_row=dict(row)) from exc
+        if len(insn_hex) % 2 == 1 and all(char in _HEX_CHARS for char in insn_hex):
+            reason = "odd_length"
+        else:
+            reason = "non_hex"
+        raise InvalidInstructionHexError(
+            insn_hex=insn_hex, raw_row=dict(row), reason=reason
+        ) from exc
 
 
 @dataclass(frozen=True)

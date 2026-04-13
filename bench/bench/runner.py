@@ -82,6 +82,7 @@ def _process(
         writer = csv.DictWriter(outf, fieldnames=OUTPUT_COLUMNS)
         writer.writeheader()
 
+        skipped_rows = 0
         for row_number, row in enumerate(reader, start=2):
             if progress_socket is not None:
                 reporter.report(inf.bytes_read)
@@ -93,6 +94,15 @@ def _process(
             except InvalidInstructionHexError as exc:
                 if exc.insn_hex == "insn":
                     logger.warning("Skipping embedded CSV header at row %d", row_number)
+                    continue
+                if exc.reason == "odd_length":
+                    skipped_rows += 1
+                    logger.warning(
+                        "Skipping odd-length instruction hex at CSV row %d: insn=%r length=%r",
+                        row_number,
+                        exc.insn_hex,
+                        row.get("length", ""),
+                    )
                     continue
                 _log_invalid_input_row(
                     row_number,
@@ -117,6 +127,9 @@ def _process(
 
         if progress_socket is not None:
             reporter.report(total_bytes, force=True, done=True)
+
+    if skipped_rows:
+        logger.info("Skipped %d odd-length instruction row(s)", skipped_rows)
 
 
 def _read_input_header(input_path: Path) -> tuple[list[str], int]:
